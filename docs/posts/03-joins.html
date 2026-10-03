@@ -274,6 +274,8 @@ if len(matches) == 0 and kind == LEFT then
     <p><code>cd go &amp;&amp; go test ./exercises/lesson03/</code><br>
     <code>cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson03.joins-test</code></p></div>
 
+  <div data-wild></div>
+
   <div class="takeaway"><p>A nested loop works for any condition but does |L|·|R| work. For equi-joins,
     hash the smaller side once and probe with the other (|L|+|R| work, build side in memory), or merge
     two sorted inputs when the sort is free. Outer joins add a "did anything match?" bit on the

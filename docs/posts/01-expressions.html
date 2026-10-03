@@ -293,6 +293,8 @@ function passes(predicate, row)
     <p><code>cd go &amp;&amp; go test ./exercises/lesson01/</code><br>
     <code>cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson01.expressions-test</code></p></div>
 
+  <div data-wild></div>
+
   <div class="takeaway"><p>An expression is a tree. Evaluate it bottom-up; treat NULL as "unknown"
     and three-valued logic follows; keep a row only on exactly TRUE. Then move every decision that
     doesn't depend on the row (node type, column position, operator) out of the per-row path by

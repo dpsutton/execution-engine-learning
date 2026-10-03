@@ -454,6 +454,8 @@ state: 6 host stack frames, locals
 cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson07.bytecode-test</code></pre>
     <p>Hints and the full list are in <a href="../exercises.html">the exercises page</a>.</p></div>
 
+  <div data-wild></div>
+
   <div class="takeaway"><p>A query is resumable when its state is data rather than a call stack.
     Compiling the plan into flat bytecode is one clean way to get there: the plan becomes loops and
     jumps, pipeline breakers become ephemeral tables, <code>ResultRow</code> becomes a return, and

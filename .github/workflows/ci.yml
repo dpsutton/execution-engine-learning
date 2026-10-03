@@ -112,3 +112,5 @@ jobs:
         run: npm ci && node check.mjs
       - name: Anki export builds from the cards
         run: uv run tools/cards_to_anki.py
+      - name: In-the-wild excerpts are verbatim at their pinned permalinks
+        run: uv run tools/verify_wild.py

@@ -281,3 +281,34 @@ table.mini tr.dim td { color: var(--ink-faint); }
   letter-spacing: .1em; margin-bottom: .45rem; color: var(--good); }
 .build-it p:last-child { margin-bottom: 0; }
 [hidden] { display: none !important; }
+
+/* ---------- in the wild: real engine source ---------- */
+details.wild { margin: 2rem 0; border: 1px solid var(--rule); border-radius: 10px; background: var(--bg-raised); font: .95rem/1.55 var(--sans); }
+details.wild > summary { cursor: pointer; padding: 1rem 1.2rem; list-style: none; display: flex; flex-direction: column; gap: .2rem; }
+details.wild > summary::-webkit-details-marker { display: none; }
+details.wild > summary::before { content: "▸ In the wild"; font: 600 .72rem/1 var(--sans); text-transform: uppercase; letter-spacing: .1em; color: var(--teal); }
+details.wild[open] > summary::before { content: "▾ In the wild"; }
+.wild-sum-title { font-weight: 600; }
+.wild-sum-sub { color: var(--ink-faint); font-size: .85rem; }
+details.wild[open] { padding-bottom: .4rem; }
+.wild-card { border-top: 1px solid var(--rule); padding: 1.1rem 1.2rem .4rem; }
+.wild-head { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; margin-bottom: .5rem; }
+.wild-engine { font: 600 .72rem/1 var(--sans); text-transform: uppercase; letter-spacing: .08em; color: #fff; background: var(--teal); padding: .3rem .5rem; border-radius: 4px; }
+.wild-title { font-weight: 600; }
+.wild-part { margin-left: auto; font-size: .82rem; }
+.wild-prompt { display: flex; gap: .6rem; align-items: baseline; background: var(--violet-soft); border-radius: 6px; padding: .55rem .75rem; margin-bottom: .7rem; }
+.wild-prompt .predict-tag { background: var(--bg-raised); }
+pre.src { margin: 0; padding: .7rem 0; font-size: .78rem; line-height: 1.5; border-left: 3px solid var(--teal); }
+pre.src code { display: block; }
+.src-line { display: block; padding-right: 1rem; white-space: pre; }
+.src-ln { display: inline-block; color: var(--ink-faint); user-select: none; padding: 0 .9rem 0 .7rem; text-align: right; opacity: .7; }
+.src-gap { color: var(--ink-faint); text-align: center; font: .8rem/1 var(--mono); padding: .2rem 0; }
+.src-seg + .src-seg pre.src { border-top: 0; }
+.wild-src { font: .75rem/1.4 var(--mono); margin: .45rem 0 .6rem; overflow-wrap: anywhere; }
+.wild-src a { color: var(--ink-faint); }
+.wild-notes { color: var(--ink-soft); margin-bottom: .6rem; }
+.wild-notes p:last-child { margin-bottom: 0; }
+.wild-foot { padding: .6rem 1.2rem 0; font-size: .85rem; color: var(--ink-faint); }
+
+/* verbatim source and code: show characters as typed (no -> or == ligatures) */
+pre.src, pre code, code { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }

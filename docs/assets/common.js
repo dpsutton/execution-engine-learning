@@ -337,8 +337,66 @@
     const due = (() => { const s = store.get("ee-sr", {}); const d = Math.floor((Date.now() - new Date().getTimezoneOffset() * 60000) / 86400000); return Object.values(s).filter((x) => x.due <= d).length; })();
     bar.after(el("a", { class: "review-link", href: up + "review.html", text: due ? `Review · ${due} due` : "Review" }));
   }
-  document.addEventListener("DOMContentLoaded", () => { markRead(); initWarmup(); initTopbarLinks(); });
+  // ------------------------------------------------------------------------------------------
+  // "In the wild": verbatim excerpts from real engines, pinned to a commit.
+  // assets/wild/NN.js = EE.addWild("NN", [ …strict JSON… ]); each entry:
+  //   { id, engine, repo: "owner/name", sha, path, lang, title, prompt?, notes (html),
+  //     segments: [ { start, end, code } ] }   -- code is lines start..end of path at sha, verbatim
+  // tools/verify_wild.py checks every segment against GitHub.
+  // ------------------------------------------------------------------------------------------
+  const WILD = {};
+  function addWild(part, entries) { WILD[part] = entries.map((e) => ({ ...e, part })); }
+  function loadWild(part, cb) {
+    if (WILD[part]) return cb(WILD[part]);
+    const base = document.querySelector('script[src$="common.js"]').getAttribute("src").replace(/common\.js$/, "");
+    const s = document.createElement("script");
+    s.src = `${base}wild/${part}.js`;
+    s.onload = () => cb(WILD[part] || []);
+    s.onerror = () => cb([]);
+    document.head.appendChild(s);
+  }
+  const permalink = (e, seg) => `https://github.com/${e.repo}/blob/${e.sha}/${e.path}#L${seg.start}-L${seg.end}`;
+  function wildCard(e, opts = {}) {
+    const code = e.segments.map((seg, i) => {
+      const lines = seg.code.split("\n");
+      const width = String(seg.end).length;
+      return el("div", { class: "src-seg" },
+        i > 0 ? el("div", { class: "src-gap", text: "⋮" }) : null,
+        el("pre", { class: "src" }, el("code", null, lines.map((l, j) =>
+          el("span", { class: "src-line" }, el("span", { class: "src-ln", text: String(seg.start + j).padStart(width) }), l.replace(/\t/g, "    ") + "\n")))));
+    });
+    const seg0 = e.segments[0], segN = e.segments[e.segments.length - 1];
+    const link = `https://github.com/${e.repo}/blob/${e.sha}/${e.path}#L${seg0.start}-L${segN.end}`;
+    return el("section", { class: "wild-card", id: e.id },
+      el("div", { class: "wild-head" },
+        el("span", { class: "wild-engine", text: e.engine }),
+        el("span", { class: "wild-title", html: e.title }),
+        opts.partLink ? el("a", { class: "wild-part", href: `posts/${PARTS[Number(e.part) - 1][0]}`, text: `Part ${Number(e.part)} · ${PARTS[Number(e.part) - 1][1]}` }) : null),
+      e.prompt ? el("div", { class: "wild-prompt" }, el("span", { class: "predict-tag", text: "Find it" }), el("span", { html: e.prompt })) : null,
+      code,
+      el("div", { class: "wild-src" }, el("a", { href: link, target: "_blank", rel: "noopener", text: `${e.repo} · ${e.path} · L${seg0.start}–${segN.end} @ ${e.sha.slice(0, 7)} ↗` })),
+      e.notes ? el("div", { class: "wild-notes", html: e.notes }) : null);
+  }
+  // <div data-wild></div> in a post: a collapsed section of this part's excerpts.
+  function initWild() {
+    const mount = document.querySelector("[data-wild]");
+    const here = partHere();
+    if (!mount || !here) return;
+    loadWild(here, (entries) => {
+      if (!entries.length) return mount.remove();
+      const engines = [...new Set(entries.map((e) => e.engine))];
+      mount.replaceWith(el("details", { class: "wild" },
+        el("summary", null,
+          el("span", { class: "wild-sum-title", text: `In the wild: ${engines.join(", ")}` }),
+          el("span", { class: "wild-sum-sub", text: "Real engine source for what you just built. Open it after the exercises." })),
+        entries.map((e) => wildCard(e)),
+        el("p", { class: "wild-foot" }, "All excerpts are verbatim, pinned to a commit, and linked to the exact lines. ",
+          el("a", { href: "../wild.html", text: "The whole tour, by engine →" }))));
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", () => { markRead(); initWarmup(); initTopbarLinks(); initWild(); });
 
   window.EE = { el, svg, clear, fmt, cell, table, frame, stepper, seg, highlightPseudo, PARTS, TOY, lcg,
-    predict, addCards, loadCards, CARDS, store, flipCard };
+    predict, addCards, loadCards, CARDS, store, flipCard, addWild, loadWild, WILD, wildCard, permalink };
 })();

@@ -296,6 +296,8 @@ avg(x):    init (0, 0)    step: if x is null then s else (s.sum + x, s.n + 1)
     <p><code>cd go &amp;&amp; go test ./exercises/lesson04/</code><br>
     <code>cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson04.aggregation-test</code></p></div>
 
+  <div data-wild></div>
+
   <div class="takeaway"><p>Aggregates are init/step/final over small, mergeable state. Group by hashing
     (any order in, memory per group) or by sorting (sorted input in, one group in memory, streams out).
     When data outgrows memory, sort runs and merge them; when only the top <em>n</em> matter, keep a heap of
