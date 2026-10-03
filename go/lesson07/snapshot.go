@@ -1,0 +1,94 @@
+package lesson07
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+)
+
+// Snapshot serializes the VM's entire state to JSON. Together with the program (which is code, not
+// state) and the database, it is enough to continue the query anywhere.
+func (vm *VM) Snapshot() ([]byte, error) { return json.Marshal(vm.S) }
+
+// Restore builds a VM that continues exactly where the snapshot left off.
+func Restore(prog *Program, db DB, snapshot []byte) (*VM, error) {
+	vm := &VM{prog: prog, db: db}
+	if err := json.Unmarshal(snapshot, &vm.S); err != nil {
+		return nil, err
+	}
+	if vm.S.ProgramSize != len(prog.Instrs) {
+		return nil, fmt.Errorf("snapshot is for a %d-instruction program, not %d", vm.S.ProgramSize, len(prog.Instrs))
+	}
+	return vm, nil
+}
+
+// ---------------------------------------------------------------------------------------------
+// JSON can't tell int64 from float64, so values are tagged: {"i":5}, {"f":1.5}; strings, booleans
+// and null are themselves.
+// ---------------------------------------------------------------------------------------------
+
+// Vals is a slice of values with a type-preserving JSON encoding.
+type Vals []Value
+
+func (vs Vals) MarshalJSON() ([]byte, error) {
+	out := make([]any, len(vs))
+	for i, v := range vs {
+		out[i] = encodeValue(v)
+	}
+	return json.Marshal(out)
+}
+
+func (vs *Vals) UnmarshalJSON(data []byte) error {
+	var raws []json.RawMessage
+	if err := json.Unmarshal(data, &raws); err != nil {
+		return err
+	}
+	*vs = make(Vals, len(raws))
+	for i, raw := range raws {
+		v, err := decodeValue(raw)
+		if err != nil {
+			return err
+		}
+		(*vs)[i] = v
+	}
+	return nil
+}
+
+func (a Acc) MarshalJSON() ([]byte, error) { return json.Marshal(Vals{a.Count, a.Sum, a.Best}) }
+func (a *Acc) UnmarshalJSON(data []byte) error {
+	var vs Vals
+	if err := json.Unmarshal(data, &vs); err != nil {
+		return err
+	}
+	a.Count, a.Sum, a.Best = vs[0].(int64), vs[1], vs[2]
+	return nil
+}
+
+func encodeValue(v Value) any {
+	switch v := v.(type) {
+	case int64:
+		return map[string]int64{"i": v}
+	case float64:
+		return map[string]float64{"f": v}
+	}
+	return v // nil, string, bool encode as themselves
+}
+
+func decodeValue(raw json.RawMessage) (Value, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) > 0 && raw[0] == '{' {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber() // keep int64s exact
+		var m map[string]json.Number
+		if err := dec.Decode(&m); err != nil {
+			return nil, err
+		}
+		if n, ok := m["i"]; ok {
+			return n.Int64()
+		}
+		return m["f"].Float64()
+	}
+	var v any
+	err := json.Unmarshal(raw, &v)
+	return v, err // nil, string, or bool
+}

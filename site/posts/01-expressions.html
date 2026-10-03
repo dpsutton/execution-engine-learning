@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Part 1 · Expressions — Execution Engine</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/common.js"></script>
+<script src="../assets/viz/01-expressions.js" defer></script>
+<style>
+  .viz svg text.v-true, td.v-true { fill: var(--good); color: var(--good); }
+  .viz svg text.v-false, td.v-false { fill: var(--bad); color: var(--bad); }
+  .viz svg text.v-null, td.v-null { fill: var(--null); color: var(--null); font-style: italic; }
+  .viz svg text.v-val { fill: var(--violet); }
+  .viz svg .node.skipped { opacity: .3; }
+  .viz svg .node.skipped rect { stroke-dasharray: 4 3; }
+  table.tvl td { text-align: center; font-weight: 600; min-width: 4.2rem; cursor: pointer; }
+  table.tvl th:first-child { background: var(--bg-sunk); }
+  table.tvl td.v-true { background: var(--good-soft); }
+  table.tvl td.v-false { background: var(--bad-soft); }
+  table.tvl td.v-null { background: var(--bg-sunk); }
+  table.tvl td.sel { outline: 2px solid var(--accent); outline-offset: -2px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Execution Engine</a>
+  <span>Part 1 of 7</span>
+  <span class="spacer"></span>
+  <button class="theme-toggle" type="button">◐ auto</button>
+</header>
+
+<article>
+  <div class="kicker">Part 1 · Expressions</div>
+  <h1>Evaluating one expression against one row</h1>
+  <p class="dek">The smallest job a query engine has: given a row and an expression like
+    <code>age + 10 &gt; 40 AND city = 'Austin'</code>, produce a value. Get this right, including NULL,
+    and everything after it is about deciding which rows to feed it.</p>
+
+  <p>A query engine does a lot: it scans tables, joins them, groups, sorts, and picks among a
+    combinatorial number of plans. Underneath all of that, though, the innermost loop keeps asking one
+    question: <em>what does this expression evaluate to for this row?</em> A <code>WHERE</code> clause
+    asks it once per row to decide whether to keep the row. A <code>SELECT</code> list asks it once per
+    output column. Join conditions, sort keys, and group keys ask it too.</p>
+
+  <p>So that's where we start. By the end of this post we'll have a representation for values and rows,
+    a tree for expressions, an evaluator that walks the tree, SQL's peculiar three-valued logic, and a
+    second evaluator that's faster because it does its thinking once instead of once per row.</p>
+
+  <h2>Values, rows, schemas</h2>
+
+  <p>Our engine has five kinds of value: NULL, integers, floats, strings, and booleans. In Go a value
+    is <code>any</code> holding <code>nil</code>, <code>int64</code>, <code>float64</code>,
+    <code>string</code>, or <code>bool</code>. In Clojure it's <code>nil</code>, a long, a double, a
+    String, or a Boolean. No dates, no decimals, no collations. Those are real work in a real engine
+    and none of it teaches anything about execution.</p>
+
+  <p>A <strong>row</strong> is a positional list of values. A <strong>schema</strong> is the matching
+    list of column names, qualified by table: <code>customers.id</code>, <code>customers.name</code>, and
+    so on. Here is the toy table that appears all through this series:</p>
+
+  <div class="table-wrap">
+  <table class="data">
+    <thead><tr><th>customers.id</th><th>customers.name</th><th>customers.city</th><th>customers.age</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Ada</td><td>Austin</td><td>36</td></tr>
+      <tr><td>2</td><td>Bo</td><td>Boston</td><td class="null">NULL</td></tr>
+      <tr><td>3</td><td>Cy</td><td>Austin</td><td>52</td></tr>
+      <tr><td>4</td><td>Di</td><td>Denver</td><td>29</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Why positional rather than a map from column name to value? Because every operator downstream will
+    touch every row, and "look up <code>age</code> in a hash map" is a cost you'd pay billions of times.
+    "Read slot 3" is an array index. Names live in the schema, which you consult once, when you
+    <em>build</em> the thing that will run. That split between work done once per query and work
+    done once per row comes back again and again, and it is the main idea in this post.</p>
+
+  <h2>Expressions are trees</h2>
+
+  <p>A parser turns <code>age + 10 &gt; 40 AND city = 'Austin'</code> into a tree. Operators are
+    interior nodes and columns and literals are leaves:</p>
+
+<pre class="pseudo">AND
+├── &gt;
+│   ├── +
+│   │   ├── Col("age")
+│   │   └── Lit(10)
+│   └── Lit(40)
+└── =
+    ├── Col("city")
+    └── Lit("Austin")
+</pre>
+
+  <p>We don't need a parser yet. The integrated engine has one, but here we build trees by hand. In
+    Go each node is a struct implementing an <code>Expr</code> interface: <code>Col{Name}</code>,
+    <code>Lit{V}</code>, <code>Bin{Op, L, R}</code>, <code>Not{E}</code>,
+    <code>IsNull{E}</code>, and <code>Func{Name, Args}</code>. In Clojure we use plain vectors:</p>
+
+<pre><code>[:and [:&gt; [:+ [:col "customers.age"] [:lit 10]] [:lit 40]]
+      [:= [:col "customers.city"] [:lit "Austin"]]]</code></pre>
+
+  <p>That's the whole data model: an expression is data describing a computation. What remains is
+    running it.</p>
+
+  <h2>Walking the tree</h2>
+
+  <p>The obvious evaluator is a recursive function with one case per node type. To evaluate a node,
+    evaluate its children, then combine the results. That's a post-order traversal:</p>
+
+<pre class="pseudo">function eval(expr, row, schema)
+  match expr
+    case Col(name)    -> return row[indexOf(schema, name)]   -- name lookup, every time
+    case Lit(v)       -> return v
+    case Bin(op, l, r) ->
+      a = eval(l, row, schema)
+      b = eval(r, row, schema)
+      return apply(op, a, b)
+    case Not(e)       -> return not3(eval(e, row, schema))
+    case IsNull(e)    -> return eval(e, row, schema) is null
+</pre>
+
+  <p>Step through it below. Pick a row and an expression and watch values move up the tree. Then pick
+    Bo and watch what his NULL age does.</p>
+
+  <div id="viz-eval"></div>
+
+  <p>Two things are worth noticing. First, with Ada the second and third expressions finish early. If
+    the left side of an <code>OR</code> is TRUE, the right side can't change the answer, so a sensible
+    evaluator doesn't compute it. Second, with Bo, the NULL doesn't stop at the <code>age</code> leaf:
+    <code>NULL + 10</code> is NULL, <code>NULL &gt; 40</code> is NULL, and then the
+    <code>AND</code> has to decide what "unknown and true" means.</p>
+
+  <h2>NULL, and why SQL has three truth values</h2>
+
+  <p>NULL in SQL doesn't mean "nothing" or "zero." It means <em>unknown</em>. Bo has an age; we just
+    don't know it. Once you read it that way, the rules all follow from one question: <em>could the
+    answer change depending on what the unknown value turns out to be?</em></p>
+
+  <ul>
+    <li><strong>Arithmetic and comparison with NULL give NULL.</strong> Is Bo's age plus 10 greater than
+      40? It depends on his age. Unknown.</li>
+    <li><strong><code>FALSE AND NULL</code> is FALSE.</strong> Whatever the unknown is, an AND with
+      a false side is false. The answer doesn't depend on the unknown, so it isn't unknown.</li>
+    <li><strong><code>TRUE OR NULL</code> is TRUE</strong>, for the same reason.</li>
+    <li><strong><code>TRUE AND NULL</code> is NULL</strong> and <strong><code>NOT NULL</code> is
+      NULL.</strong> Both still depend on the unknown.</li>
+    <li><strong><code>IS NULL</code> is the exception.</strong> It looks at the unknown-ness itself, so it
+      only ever returns TRUE or FALSE.</li>
+  </ul>
+
+  <p>Then comes the rule that bites in practice: <strong>a <code>WHERE</code> clause keeps a row only
+    when the predicate is TRUE.</strong> NULL is not TRUE, so NULL rows are dropped, just as
+    FALSE ones are. That makes <code>WHERE p</code> and <code>WHERE NOT p</code> not complements
+    of each other: a row where <code>p</code> is NULL appears in neither result. Try it:</p>
+
+  <div id="viz-3vl"></div>
+
+  <p>In code, three-valued AND and OR are small enough to read at a glance. Note the order of the
+    checks: the decisive value wins over NULL.</p>
+
+<pre class="pseudo">function and3(a, b)
+  if a == false or b == false then return false   -- decisive, even if the other is NULL
+  if a == null or b == null then return null
+  return true
+
+function or3(a, b)
+  if a == true or b == true then return true
+  if a == null or b == null then return null
+  return false
+
+function passes(predicate, row)
+  return eval(predicate, row) == true              -- not "truthy": exactly TRUE
+</pre>
+
+  <p>Short-circuiting follows directly from these definitions. If the left side of an AND is FALSE,
+    you can return FALSE without evaluating the right side. If the left side is NULL you
+    <em>can't</em> stop, because a FALSE on the right would turn the result into FALSE. So
+    evaluate the right side as well.</p>
+
+  <h3>The rest of the semantics</h3>
+
+  <p>Every engine has to pick answers for the edge cases. Here are ours, as written down in the
+    project's design doc:</p>
+  <ul>
+    <li><code>int + int</code> is an int; involve a float anywhere and you get a float.
+      <code>/</code> <em>always</em> returns a float, so <code>7 / 2</code> is <code>3.50</code>.
+      Postgres would say <code>3</code>; we're avoiding a whole category of surprise.</li>
+    <li>Division by zero is NULL. Postgres raises an error and MySQL returns NULL; we follow MySQL
+      because errors mid-stream complicate everything that comes later.</li>
+    <li>Ints and floats compare numerically; strings compare by bytes; comparing a string to a number
+      is an error.</li>
+    <li>Functions (<code>lower</code>, <code>upper</code>, <code>length</code>, <code>abs</code>) return
+      NULL for NULL input. <code>coalesce</code> exists precisely to not do that: it returns its first
+      non-NULL argument.</li>
+  </ul>
+
+  <h2>Compiling the tree into closures</h2>
+
+  <p>The tree walker works, but look at what it repeats for every row. For each node, it re-decides
+    which kind of node this is (the <code>match</code>). For every column, it searches the schema for
+    the column's name. Neither answer ever changes between rows. Both are decisions about the
+    <em>query</em>, and we're making them over and over at <em>row</em> time.</p>
+
+  <p>The fix is to walk the tree <em>once</em>, make every decision that doesn't depend on the row,
+    and return a function that only does the remaining per-row work. Each node becomes a closure that
+    has already captured its children's closures and its resolved column index:</p>
+
+<pre class="pseudo">function compile(expr, schema) -> (row -> value)
+  match expr
+    case Col(name) ->
+      i = indexOf(schema, name)            -- resolved once, here
+      if i &lt; 0 then error("unknown column " + name)
+      return row -> row[i]
+    case Lit(v) ->
+      return row -> v
+    case Bin("and", l, r) ->
+      fl = compile(l, schema); fr = compile(r, schema)
+      return row ->
+        a = fl(row)
+        if a == false then return false     -- short-circuit
+        return and3(a, fr(row))
+    case Bin(op, l, r) ->
+      fl = compile(l, schema); fr = compile(r, schema)
+      f  = lookupOperator(op)               -- also resolved once
+      return row -> f(fl(row), fr(row))
+</pre>
+
+  <p>A few things changed beyond speed. An unknown column is now an error at <em>compile</em> time,
+    before any row is read. The per-row path doesn't mention the schema at all. And the structure of
+    the work changed: the tree is still there, but it now exists as a tree of closures pointing at
+    closures, and evaluation is a chain of plain function calls.</p>
+
+  <p>In Clojure this is especially natural, since <code>compile</code> returns <code>fn</code>s:</p>
+
+<pre><code>(defn compile-expr [expr schema]
+  (case (first expr)
+    :col (let [i (.indexOf ^java.util.List schema (second expr))]
+           (fn [row] (nth row i)))
+    :lit (let [v (second expr)] (fn [_] v))
+    :and (let [l (compile-expr (nth expr 1) schema)
+               r (compile-expr (nth expr 2) schema)]
+           (fn [row] (let [a (l row)]
+                       (if (false? a) false (and3 a (r row))))))
+    …))</code></pre>
+
+  <p>How much faster is it? On the JVM, with the JIT inlining small closures, often several times for
+    simple predicates. The exact number doesn't matter here. What matters is the habit of separating
+    the work that depends only on the query from the work that depends on the row. Parts 6 and 7 push
+    that habit much further: the planner makes even more decisions up front, and the final part
+    compiles a whole <em>query</em>, not just one expression.</p>
+
+  <div class="aside"><p>This is the "closure compilation" trick from interpreter folklore. It sits in
+    the space between a naive AST interpreter and real code generation, and it's how many embedded
+    engines evaluate expressions. Production systems go further and generate bytecode or machine code
+    per query (Spark's whole-stage codegen, HyPer and Umbra via LLVM), or they amortize the per-row
+    cost by evaluating each node over a <em>batch</em> of a thousand values at once (DuckDB,
+    vectorized engines generally).</p></div>
+
+  <h2>Where does the work in progress live?</h2>
+
+  <p>Here's a question that looks pointless now but will matter by part 7: while an expression is
+    halfway through evaluation, where is its state? In the tree walker, it's on the <em>call stack</em>:
+    the left child's result sits in a local variable of the parent's stack frame while the right child
+    is evaluated. The compiled version is the same; the nested closure calls hold intermediate values
+    in their frames.</p>
+
+  <p>For expressions that's fine, since they run for nanoseconds. Nobody wants to pause halfway through
+    <code>age + 10</code>. A whole query is another matter: it can run for minutes, and "paused partway
+    through" becomes a feature you might want. In the next part, operators get their own state, and we'll
+    start keeping track of which state lives in objects on the heap and which lives in stack frames.</p>
+
+  <div class="sqlglot"><p>sqlglot's executor also compiles each expression once per query, but to
+    <em>Python source</em> rather than closures. It generates a string like
+    <code>scope["customers"]["age"] + 10 &gt; 40</code>, compiles it with Python's <code>compile</code>,
+    and runs it with <code>eval</code> for every row against a <code>Context</code>. Column access goes
+    through a <code>RowReader</code>, a single reusable cursor object whose <code>row</code> slot is
+    repointed at each row, so reading a column is a dict lookup to an index followed by a tuple index.
+    It's the same split between once per query and once per row, with Python's compiler doing the
+    "compile" step.</p></div>
+
+  <div class="code-ref"><p><code>go/lesson01/expressions.go</code> ·
+    <code>clojure/src/lesson01/expressions.clj</code> (ns <code>lesson01.expressions</code>). Both
+    have the AST, the tree-walking <code>Eval</code>, the closure-compiling <code>Compile</code>, and
+    3VL helpers. The demos evaluate the predicates from this post over the toy table both ways:
+    <code>go run ./cmd/lesson01</code> / <code>clojure -M -m lesson01.expressions</code>.</p></div>
+
+  <div class="build-it"><p>The exercise track for this part has the reference lesson with the
+    interesting function bodies replaced by TODOs, and tests that fail until you fill them in. For this
+    part: <code>eval-binary</code>, <code>and-or-3vl</code>, <code>compile-closures</code>, and in Clojure <code>eval-tree</code> (see <a href="../../EXERCISES.md">EXERCISES.md</a> for the current list and hints).</p>
+    <p><code>cd go &amp;&amp; go test ./exercises/lesson01/</code><br>
+    <code>cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson01.expressions-test</code></p></div>
+
+  <div class="takeaway"><p>An expression is a tree. Evaluate it bottom-up; treat NULL as "unknown"
+    and three-valued logic follows; keep a row only on exactly TRUE. Then move every decision that
+    doesn't depend on the row (node type, column position, operator) out of the per-row path by
+    compiling the tree once.</p></div>
+
+  <div data-series></div>
+</article>
+</body>
+</html>

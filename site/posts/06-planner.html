@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Part 6 · Statistics &amp; planning — Execution Engine</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/common.js"></script>
+<script src="../assets/viz/06-planner.js" defer></script>
+<style>
+  #viz-dp-note { margin-top: .5rem; }
+  .formula { font: .95rem/1.5 var(--mono); background: var(--bg-raised); border: 1px solid var(--rule); border-radius: 8px; padding: .8rem 1rem; margin: 0 0 1.4rem; overflow-x: auto; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Execution Engine</a>
+  <span>Part 6 of 7</span>
+  <span class="spacer"></span>
+  <button class="theme-toggle" type="button">◐ auto</button>
+</header>
+
+<article>
+  <div class="kicker">Part 6 · Statistics &amp; planning</div>
+  <h1>Guessing row counts, picking a plan</h1>
+  <p class="dek">Parts 3–5 gave us several ways to do every job: three join algorithms, scan or
+    index, hash or sort aggregation. Which one is right depends on how many rows each operator will
+    see, and the planner has to decide before running anything. This part covers how it estimates
+    those counts, how it prices a plan, and how it searches for the cheapest join order.</p>
+
+  <div data-warmup></div>
+
+  <p>Here is a three-table query over the generated dataset:</p>
+
+<pre><code>SELECT c.city, sum(o.qty * p.price)
+FROM customers c, orders o, products p
+WHERE o.customer_id = c.id AND o.product_id = p.id AND c.city = 'Seattle'
+GROUP BY c.city</code></pre>
+
+  <p>The SQL says nothing about how to run it. We could join customers to orders first, or orders to
+    products first. Each join could be a hash join (which side builds?), a nested loop, or an index
+    nested-loop join, since <code>orders.customer_id</code> and <code>products.id</code> are indexed.
+    The Seattle filter could narrow customers before the join or be applied after. With three tables
+    there are a dozen reasonable plans. With eight tables there are millions. Their costs can differ
+    by orders of magnitude.</p>
+
+  <p>A cost-based planner has three parts:</p>
+  <ol>
+    <li>a <strong>cardinality estimator</strong> that guesses how many rows each operator outputs,</li>
+    <li>a <strong>cost model</strong> that turns those row counts into a price for each operator,</li>
+    <li>a <strong>search</strong> over plans that finds the cheapest one without pricing them all.</li>
+  </ol>
+  <p>The search is the elegant part and the cost model is the crude part. Almost all of the trouble
+    comes from the estimator.</p>
+
+  <h2>ANALYZE: what we know about a column</h2>
+
+  <p>The estimator can't look at the data while planning. That would mean running the query to
+    plan the query. Instead, an <code>ANALYZE</code> pass reads each table once, ahead of time, and
+    keeps a small summary per column:</p>
+
+<pre class="pseudo">function analyze(table)
+  for each column c
+    values  = column c of every row
+    nonNull = values without nulls, sorted
+    stats[c] = {
+      rows:  len(values),
+      nulls: len(values) - len(nonNull),
+      ndv:   count distinct nonNull,             -- number of distinct values
+      min:   first(nonNull),  max: last(nonNull),
+      hist:  equiDepth(nonNull, 8)                -- see below
+    }
+</pre>
+
+  <p>Real databases sample instead of reading everything. Postgres reads 30,000 rows by default and
+    estimates ndv from the sample, which is a hard problem on its own. Our tables are tiny, so the
+    lesson reads them all.</p>
+
+  <p>With only <code>rows</code> and <code>ndv</code>, the natural guess for
+    <code>orders.customer_id = 7</code> is "every customer has the same number of orders":
+    <code>5000 / 200 = 25</code>. But the generator is skewed: half of all orders go to customers
+    1–20. Customer 7 actually has 126 orders, five times the estimate. Customer 150 has 11. A single
+    ndv can't describe a skewed column. A histogram can.</p>
+
+  <h2>Histograms</h2>
+
+  <p>A histogram splits the value range into buckets and records how many rows fall in each. Inside a
+    bucket, the estimator assumes values are spread evenly. There are two ways to pick the bucket
+    boundaries:</p>
+  <ul>
+    <li><strong>Equi-width:</strong> equal value ranges (1–25, 26–50, …). Simple, but under skew most
+      rows pile into a few buckets, and within those buckets the evenness assumption is badly wrong.</li>
+    <li><strong>Equi-depth:</strong> equal row counts. Each bucket holds about 1/8 of the rows, so
+      bucket boundaries crowd together where the data is dense. Hot values end up in narrow buckets,
+      where the evenness assumption is nearly right. Postgres and most others use this, plus a
+      separate list of the most common values.</li>
+  </ul>
+
+<pre class="pseudo">function equiDepth(sorted, k)
+  buckets = []
+  for b in 0 .. k-1
+    end = index of the ((b+1)/k)-th row, extended so one value never spans two buckets
+    buckets.append({ hi: sorted[end], count: rows in this bucket, ndv: distinct in this bucket })
+  return buckets
+
+function estimateLessOrEqual(hist, x)              -- col &lt;= x
+  sum of count for buckets entirely &lt;= x
+  + count * (x - bucket.lo + 1) / (bucket.hi - bucket.lo + 1)   -- linear slice of x's bucket
+
+function estimateEquals(hist, x)                   -- col = x
+  b = bucket containing x
+  return b.count / b.ndv                           -- values in a bucket are equally common
+</pre>
+
+  <p>Slide the predicate around below. The grey bars are the real per-value counts. The teal blocks
+    are what the estimator <em>thinks</em> the distribution looks like: one flat block per bucket.
+    Try <code>orders.customer_id = x</code> with no histogram, then equi-width, then equi-depth, at
+    x = 7 and x = 150. Then try <code>orders.day</code>, which is uniform: every method does well
+    there.</p>
+
+  <div id="viz-histogram"></div>
+
+  <p>The equi-depth histogram spends four of its eight buckets on customers 1–19, because that's
+    where half the rows are. Its estimate for customer 7 is 143 against an actual 126. The
+    equi-width histogram puts customers 1–25 in a single bucket, mixing the hot range with the start
+    of the cold one, so it's off in both directions.</p>
+
+  <h2>Selectivity: combining predicates</h2>
+
+  <p>A <em>selectivity</em> is the fraction of rows a predicate keeps. Estimated output =
+    input rows × selectivity. The lesson code uses these rules, which are close to what every textbook
+    planner starts with:</p>
+
+  <div class="table-wrap"><table class="data">
+    <thead><tr><th>predicate</th><th>selectivity</th></tr></thead>
+    <tbody>
+      <tr><td>col = const</td><td>1 / ndv × (non-null fraction)</td></tr>
+      <tr><td>col &lt; / &lt;= / &gt; / &gt;= const</td><td>histogram fraction, interpolated inside a bucket</td></tr>
+      <tr><td>col IS NULL</td><td>nulls / rows</td></tr>
+      <tr><td>a AND b</td><td>s(a) × s(b)</td></tr>
+      <tr><td>a OR b</td><td>s(a) + s(b) − s(a)·s(b)</td></tr>
+      <tr><td>NOT a</td><td>1 − s(a)</td></tr>
+      <tr><td>anything else</td><td>1/3 (a shrug, kept from System R)</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>The <code>AND</code> rule is the <strong>independence assumption</strong>: knowing one predicate
+    is true tells you nothing about the other. In our data it holds, because city and age were
+    generated independently. In real data it often doesn't. <code>city = 'Austin' AND state =
+    'TX'</code> has selectivity <em>s(city)</em>, not <em>s(city) × s(state)</em>, so the product
+    underestimates by a factor of 1/s(state), maybe 50×. Correlated predicates are the main reason
+    estimates go wrong, and the reason Postgres added <code>CREATE STATISTICS</code> for column
+    groups.</p>
+
+  <h2>Join cardinality</h2>
+
+  <p>For an equi-join <code>L.a = R.b</code>, the standard estimate is:</p>
+
+  <div class="formula">|L ⋈ R| = |L| · |R| / max(ndv(L.a), ndv(R.b))</div>
+
+  <p>The reasoning: assume that every value on the side with fewer distinct values appears on the
+    other side too (the <em>containment</em> assumption), and that values are evenly spread. Then each
+    of the <code>|L|</code> rows matches <code>|R| / ndv(R.b)</code> rows on average, and the max picks
+    the side whose values are the subset. For a foreign-key join like
+    <code>orders.customer_id = customers.id</code>, this gives exactly <code>|orders|</code>, which is
+    right.</p>
+
+  <p>Now add the filter. Seattle is 1 of 8 cities, so the estimator guesses 200/8 = 25 Seattle
+    customers. The generator makes Seattle rare, and there are only 10. The join estimate is
+    5000 · 25 / 200 = 625 orders, and the actual count is 622. The estimate is nearly perfect,
+    <em>by accident</em>: the customer count is 2.5× too high, but those 10 customers include some of
+    the hot ones from 1–20, so they have more orders than average. The two errors cancel. In
+    general they don't, and they multiply instead.</p>
+
+  <h2>The cost model</h2>
+
+  <p>Costs are in made-up units, roughly "rows touched". The only thing that matters is that they
+    rank plans in the right order:</p>
+
+<pre class="pseudo">cost(Scan t)               = rows(t)
+cost(Filter)               = rows(input)
+cost(HashJoin)             = 2 · rows(build) + rows(probe)       -- build side = right input
+cost(NLJoin)               = rows(outer) · rows(inner)
+cost(IndexNLJoin)          = rows(outer) · (log2(rows(inner)) + matches / rows(outer))
+cost(Sort)                 = n · log2(n)
+cost(HashAggregate)        = rows(input)
+total(plan)                = sum over every operator
+</pre>
+
+  <p>Real cost models separate CPU from I/O, sequential from random reads, and account for memory
+    (a hash join that spills costs far more). They are still rough guesses, and Leis et al. found
+    that once the cardinalities are right, even a very simple cost model picks good plans. The
+    cardinalities are what matter.</p>
+
+  <h2>Searching: dynamic programming over subsets</h2>
+
+  <p>With n tables there are n! left-deep join orders (each join's right input is a base table),
+    and far more if you allow bushy trees. Pricing each one separately doesn't scale. In 1979, System R
+    observed that the problem has <strong>optimal substructure</strong>: the best plan joining
+    {c, o, p} must contain the best plan for whichever two-table subset it joins first. So compute
+    the best plan for every subset, smallest first, and reuse those results:</p>
+
+<pre class="pseudo">function bestPlan(relations, predicates)
+  best = {}
+  for each r in relations                        -- level 1: access paths
+    best[{r}] = cheapest of (Scan r + filters, IndexScan r if an index fits a filter)
+
+  for size in 2 .. n
+    for each subset S of relations with |S| = size
+      for each r in S                            -- r joins last (left-deep)
+        left = best[S - {r}]
+        if left is null then continue
+        if no predicate connects S - {r} and r then continue   -- skip cross products
+        for alg in [HashJoin, NLJoin, IndexNLJoin if r has an index on its join column]
+          candidate = Join(alg, left, accessPath(r))
+          if cost(candidate) &lt; cost(best[S]) then best[S] = candidate
+  return best[relations]
+</pre>
+
+  <p>There are 2ⁿ subsets with up to n choices each, which is exponential but far better than n!.
+    The usual practical limit is about 10–12 tables; past that, planners switch to greedy or genetic
+    search. (Postgres's <code>geqo_threshold</code> defaults to 12.) Step through it below, then
+    switch scenarios: the filters change the estimates, and the estimates change which plan wins.</p>
+
+  <div id="viz-dp"></div>
+
+  <p>Some things to notice:</p>
+  <ul>
+    <li><strong>{c, p} is never built.</strong> No predicate connects customers and products, so
+      joining them first would produce a 10,000-row cross product. Selinger's heuristic refuses to
+      consider it. That's usually right, though not always: a cross product of two tiny filtered
+      tables can be the best first step.</li>
+    <li><strong>The algorithm changes with the estimate.</strong> With a small filtered outer side,
+      an index nested-loop join beats building a hash table. That's the trade-off from part 5,
+      now decided automatically.</li>
+    <li><strong>Compare est and actual for <code>p.category = 'games'</code>.</strong> The estimator
+      assumes 50/5 = 10 games products; the generator produced 4. Everything above that filter is 2.5×
+      too big. Here the mistake is harmless, because the plan is the same either way. When a 2.5×
+      error flips a hash join to a nested loop over a million rows, it isn't.</li>
+  </ul>
+
+  <div class="aside"><p>Selinger's planner also tracked <em>interesting orders</em>. A plan that is
+    more expensive but produces rows sorted on a useful column (for a later merge join, GROUP BY, or
+    ORDER BY) is kept alongside the cheapest plan, because it may save a sort further up. Our lesson
+    skips this, so the DP table holds one plan per subset. A real planner keeps one per (subset,
+    sort order).</p></div>
+
+  <h2>EXPLAIN: estimates next to reality</h2>
+
+  <p>The integrated engine prints its chosen physical plan with an estimated row count on every
+    node. The lesson demo runs the plan and prints the actual count next to it, like Postgres's
+    <code>EXPLAIN ANALYZE</code>. The last step of the figure above shows the same thing for the
+    chosen plan. Reading these side by side is the most useful debugging habit for slow queries:
+    find the lowest node where estimate and actual diverge, because every operator above it was
+    chosen on bad information.</p>
+
+  <p>Errors compound. If each estimate is off by 2× and a query has five joins, the top of the plan
+    can be off by 2⁵ = 32×, in either direction. Leis et al. measured this on a real dataset (IMDB)
+    with the planners of several major databases. The errors routinely reached multiple orders of
+    magnitude, they grew exponentially with the number of joins, and they caused nearly all the bad
+    plans. Planners are only as good as their row counts.</p>
+
+  <div class="sqlglot"><p>sqlglot's optimizer is rule-based. It qualifies columns, pushes predicates
+    down, merges subqueries, simplifies expressions, and (in <code>optimize_joins</code>) reorders
+    joins only so that each join's condition refers to tables already joined, avoiding cross joins.
+    There are no statistics and no costs, because it's a SQL-to-SQL transpiler whose output usually
+    goes to a database that does its own planning. Its executor's <code>Plan</code> takes the
+    optimized query as-is, so the join order you write is the join order you get.</p></div>
+
+  <div class="code-ref"><p><code>go/lesson06/planner.go</code> · <code>clojure/src/lesson06/planner.clj</code>
+    (ns <code>lesson06.planner</code>): <code>Analyze</code> (column stats + equi-depth histograms),
+    the selectivity and join-cardinality estimator, the cost model, the DP join orderer, and an
+    EXPLAIN that runs the plan and prints estimated vs actual rows per node. Run with
+    <code>go run ./cmd/lesson06</code> or <code>clojure -M -m lesson06.planner</code>. In the
+    integrated engine: <code>\stats orders</code> and <code>\explain on</code>.</p></div>
+
+  <div class="build-it"><p>Write the estimator and the search: equality and range selectivity from stats and histograms, equi-join cardinality, and the DP over subsets that picks a join order. The exercise track for this part (<code>eq-selectivity</code>, <code>range-selectivity</code>, <code>join-cardinality</code>, <code>join-order-dp</code>)
+    strips those function bodies out of the lesson and leaves the tests. Fill them in until the tests pass:</p>
+<pre><code>cd go &amp;&amp; go test ./exercises/lesson06/
+cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson06.planner-test</code></pre>
+    <p>Hints and the full list are in <a href="../../EXERCISES.md">EXERCISES.md</a>.</p></div>
+
+  <div class="takeaway"><p>A planner searches plans with dynamic programming over subsets and
+    prices them with a crude cost model. Both depend entirely on cardinality estimates, which come
+    from per-column summaries (ndv, min/max, equi-depth histograms) combined under independence and
+    containment assumptions. When a plan is bad, check the estimates before the cost model.</p></div>
+
+  <div data-series></div>
+</article>
+</body>
+</html>

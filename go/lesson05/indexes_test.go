@@ -1,0 +1,71 @@
+package lesson05
+
+import (
+	"slices"
+	"testing"
+)
+
+func TestBPlusTreeSearchAndRange(t *testing.T) {
+	for _, order := range []int{3, 4, 5, 32} {
+		tree := NewBPlusTree(order)
+		// insert 1..500 in a scrambled order, each key twice
+		for i := 0; i < 1000; i++ {
+			k := int64((i*7919)%500 + 1)
+			tree.Insert(k, i)
+		}
+		for k := int64(1); k <= 500; k++ {
+			if ids := tree.Search(k); len(ids) != 2 {
+				t.Fatalf("order %d: key %d has %d ids", order, k, len(ids))
+			}
+		}
+		if ids := tree.Search(int64(501)); ids != nil {
+			t.Fatalf("missing key returned %v", ids)
+		}
+		got := tree.Range(&Bound{int64(10), true}, &Bound{int64(20), false})
+		if len(got) != 20 { // keys 10..19, two ids each
+			t.Fatalf("order %d: range returned %d ids", order, len(got))
+		}
+		if all := tree.Range(nil, nil); len(all) != 1000 {
+			t.Fatalf("full range returned %d", len(all))
+		}
+	}
+}
+
+func TestTreeStaysShallow(t *testing.T) {
+	tree := NewBPlusTree(32)
+	for i := 0; i < 100_000; i++ {
+		tree.Insert(int64(i), i)
+	}
+	if h := tree.Height(); h > 4 {
+		t.Fatalf("height %d for 100k keys at order 32", h)
+	}
+}
+
+func TestIndexScanMatchesFilter(t *testing.T) {
+	_, _, orders := Generate()
+	idx := BuildIndex(orders, 1, 32)
+	want := Collect(&Filter{Child: &Scan{T: orders}, Pred: func(r Row) bool { return r[1] == int64(7) }})
+	got := Collect(&IndexScan{T: orders, Index: idx, Eq: int64(7)})
+	if len(want) != len(got) {
+		t.Fatalf("index scan %d rows, filter %d", len(got), len(want))
+	}
+	for i := range want { // posting lists keep insertion order, so the orders agree
+		if !slices.Equal(want[i], got[i]) {
+			t.Fatalf("row %d: %v vs %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestIndexNLJoin(t *testing.T) {
+	customers, _, orders := Generate()
+	idx := BuildIndex(orders, 1, 32)
+	rows := Collect(&IndexNLJoin{Outer: &Scan{T: customers}, OuterKey: 0, Inner: orders, Index: idx})
+	if len(rows) != 5000 { // every order's customer exists in the generated data
+		t.Fatalf("got %d rows", len(rows))
+	}
+	for _, r := range rows {
+		if r[0] != r[5] {
+			t.Fatalf("mismatched join row %v", r)
+		}
+	}
+}

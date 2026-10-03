@@ -1,0 +1,277 @@
+(ns lesson07.compiler
+  "Compile a physical plan into VM bytecode with the produce/consume model (Neumann 2011, and the
+  same shape SQLite emits).
+
+  `compile-node` takes a plan node and a `consume` function. It emits the code that PRODUCES the
+  node's rows, and wherever a row becomes available it calls `(consume env)` to emit the code that
+  USES that row. `env` says where the row lives: {:schema [names…] :regs [register numbers…]}.
+
+      Scan       → emits a loop over the table; consume goes INSIDE the loop body
+      Filter     → asks its child to produce, and its consume emits `if not pred: skip` + parent's consume
+      NL join    → the right side's loop is emitted inside the left side's consume: nested loops
+      Hash join  → build loop first (consume = HashInsert), then the probe loop
+      Aggregate  → child loop (consume = AggStep); then a second loop over the groups
+      Sort       → child loop (consume = SorterInsert); then a loop over the sorted rows
+      Limit      → parent's consume, then `DecrJumpZero counter → Halt`
+
+  Operators disappear: Filter and Project become a few instructions inside whatever loop is
+  producing rows. Only the pipeline breakers (hash build, aggregate, sort) end one loop and start
+  another.
+
+  Plan nodes are maps:
+      {:op :scan :table \"customers\" :alias \"c\"}
+      {:op :filter :pred expr :child …}
+      {:op :project :items [[expr name] …] :child …}
+      {:op :nl-join :left … :right … :pred expr}
+      {:op :hash-join :left … :right … :left-key expr :right-key expr}   ; builds on :right
+      {:op :aggregate :group [expr …] :aggs [{:fn \"sum\" :arg expr|:* :name \"n\"} …] :child …}
+      {:op :sort :keys [[expr :asc|:desc] …] :child …}
+      {:op :limit :n 10 :child …}"
+  (:require [clojure.string :as str]
+            [clojure.walk :as walk]))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Emitting code
+
+(defn- new-compiler []
+  (atom {:code [] :next-reg 1 :ids {} :halt-patches []}))
+
+(defn- here [c] (count (:code @c)))
+
+(defn- emit!
+  "Append an instruction; return its address."
+  [c op & {:as params}]
+  (let [addr (here c)]
+    (swap! c update :code conj (merge {:op op} params))
+    addr))
+
+(defn- patch!
+  "Fill in a jump target once it's known (forward jumps are emitted before their target exists)."
+  [c addr param target]
+  (swap! c assoc-in [:code addr param] target))
+
+(defn- alloc-regs! [c n]
+  (let [first-reg (:next-reg @c)] (swap! c update :next-reg + n) first-reg))
+
+(defn- alloc-id!
+  "Next id for a kind of runtime object: :cursor, :hash, :sorter, :agg."
+  [c kind]
+  (let [id (get-in @c [:ids kind] 0)] (swap! c assoc-in [:ids kind] (inc id)) id))
+
+(defn- resolve-col [{:keys [schema regs]} col-name]
+  (let [exact (keep-indexed (fn [i c] (when (= c col-name) i)) schema)
+        bare  (keep-indexed (fn [i c] (when (str/ends-with? c (str "." col-name)) i)) schema)
+        i     (cond (seq exact) (first exact) (= 1 (count bare)) (first bare)
+                    :else (throw (ex-info (str "unknown or ambiguous column " col-name) {:schema schema})))]
+    (regs i)))
+
+(def ^:private op-codes
+  {:+ :Add :- :Sub :* :Mul :/ :Div
+   := :Eq :!= :Ne :< :Lt :<= :Le :> :Gt :>= :Ge :and :And :or :Or})
+
+(defn- expr-sql [expr]
+  (let [[tag a b] expr]
+    (case tag
+      :col a
+      :lit (pr-str a)
+      :fn (str a "(…)")
+      :not (str "NOT " (expr-sql a))
+      :is-null (str (expr-sql a) " IS NULL")
+      :is-not-null (str (expr-sql a) " IS NOT NULL")
+      (str (expr-sql a) " " (name tag) " " (expr-sql b)))))
+
+(defn compile-expr
+  "Emit code computing `expr` for the row in `env`; return the register holding the result.
+  A column reference emits nothing — the value is already in a register."
+  [c expr env]
+  (let [[tag a b] expr]
+    (case tag
+      :col (resolve-col env a)
+      :lit (let [r (alloc-regs! c 1)]
+             (cond (nil? a) (emit! c :Null :p2 r :comment (str "r[" r "] = NULL"))
+                   (int? a) (emit! c :Integer :p2 r :p4 a :comment (str "r[" r "] = " a))
+                   :else    (emit! c :Const :p2 r :p4 a :comment (str "r[" r "] = " (pr-str a))))
+             r)
+      (:+ :- :* :/ := :!= :< :<= :> :>= :and :or)
+      (let [x (compile-expr c a env) y (compile-expr c b env) r (alloc-regs! c 1)]
+        (emit! c (op-codes tag) :p1 x :p2 y :p3 r :comment (str "r[" r "] = " (expr-sql expr)))
+        r)
+      :not (let [x (compile-expr c a env) r (alloc-regs! c 1)] (emit! c :Not :p1 x :p3 r) r)
+      :is-null (let [x (compile-expr c a env) r (alloc-regs! c 1)] (emit! c :IsNull :p1 x :p3 r) r)
+      :is-not-null (let [x (compile-expr c a env) r (alloc-regs! c 1)] (emit! c :NotNull :p1 x :p3 r) r)
+      :fn (let [args (drop 2 expr)
+                regs (mapv #(compile-expr c % env) args)
+                base (alloc-regs! c (count regs))
+                r    (alloc-regs! c 1)]
+            (doseq [[i src] (map-indexed vector regs)] (emit! c :Copy :p1 src :p2 (+ base i)))
+            (emit! c :Func :p1 base :p2 (count regs) :p3 r :p4 a :comment (str "r[" r "] = " a "(…)"))
+            r))))
+
+(defn- contiguous!
+  "Many instructions take a block of consecutive registers. Return the first register of a block
+  holding `regs`, copying into a fresh block unless they're already consecutive."
+  [c regs]
+  (if (and (seq regs) (= regs (vec (range (first regs) (+ (first regs) (count regs))))))
+    (first regs)
+    (let [base (alloc-regs! c (count regs))]
+      (doseq [[i r] (map-indexed vector regs)] (emit! c :Copy :p1 r :p2 (+ base i)))
+      base)))
+
+(defn- out-name [expr] (if (= :col (first expr)) (second expr) (expr-sql expr)))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Produce / consume
+
+(defmulti compile-node
+  "Emit code producing `node`'s rows; call (consume env) where each row is available."
+  (fn [_c node _consume] (:op node)))
+
+(defmethod compile-node :scan [c {:keys [table alias columns]} consume]
+  (let [cur    (alloc-id! c :cursor)
+        schema (mapv #(str alias "." %) columns)
+        _      (emit! c :OpenScan :p1 cur :p4 table :comment (str "cursor " cur " on " table))
+        rewind (emit! c :Rewind :p1 cur :comment "if empty, skip the loop")
+        top    (here c)
+        base   (alloc-regs! c (count schema))]
+    (doseq [[i col] (map-indexed vector schema)]
+      (emit! c :Column :p1 cur :p2 i :p3 (+ base i) :comment (str "r[" (+ base i) "] = " col)))
+    (consume {:schema schema :regs (vec (range base (+ base (count schema))))})
+    (emit! c :Next :p1 cur :p2 top :comment (str "loop: next " alias " row"))
+    (patch! c rewind :p2 (here c))))
+
+(defmethod compile-node :filter [c {:keys [pred child]} consume]
+  ;; EXERCISE(compile-filter): Have the child produce rows; for each, emit code computing pred, an IfNot that
+  ;; skips the row, then the parent's consume. Patch the IfNot's jump target to just after it.
+  (compile-node c child
+                (fn [env]
+                  (let [r    (compile-expr c pred env)
+                        skip (emit! c :IfNot :p1 r :comment (str "WHERE " (expr-sql pred)))]
+                    (consume env)
+                    (patch! c skip :p2 (here c)))))
+  ;; END EXERCISE
+  )
+
+(defmethod compile-node :project [c {:keys [items child]} consume]
+  (compile-node c child
+                (fn [env]
+                  (consume {:schema (mapv second items)
+                            :regs   (mapv #(compile-expr c (first %) env) items)}))))
+
+(defn- join-env [l r] {:schema (into (:schema l) (:schema r)) :regs (into (:regs l) (:regs r))})
+
+(defmethod compile-node :nl-join [c {:keys [left right pred]} consume]
+  ;; EXERCISE(compile-nl-join): Emit the right side's loop INSIDE the left side's consume. In the inner
+  ;; consume, combine both envs (join-env), test pred like a filter, and call the parent's consume.
+  (compile-node c left
+                (fn [lenv]
+                  (compile-node c right
+                                (fn [renv]
+                                  (let [env  (join-env lenv renv)
+                                        r    (compile-expr c pred env)
+                                        skip (emit! c :IfNot :p1 r :comment (str "ON " (expr-sql pred)))]
+                                    (consume env)
+                                    (patch! c skip :p2 (here c)))))))
+  ;; END EXERCISE
+  )
+
+(defmethod compile-node :hash-join [c {:keys [left right left-key right-key]} consume]
+  (let [ht      (alloc-id! c :hash)
+        rschema (volatile! nil)]
+    (emit! c :HashOpen :p1 ht :comment (str "hash table " ht " (build side)"))
+    ;; build: every right row goes into the table under its key
+    (compile-node c right
+                  (fn [renv]
+                    (vreset! rschema (:schema renv))
+                    (let [k    (compile-expr c right-key renv)
+                          base (contiguous! c (:regs renv))]
+                      (emit! c :HashInsert :p1 ht :p2 k :p3 base :p4 (count (:regs renv))
+                             :comment (str "build on " (expr-sql right-key))))))
+    ;; probe: for each left row, iterate its matches
+    (compile-node c left
+                  (fn [lenv]
+                    (let [k    (compile-expr c left-key lenv)
+                          seek (emit! c :HashSeek :p1 ht :p2 k :comment (str "probe with " (expr-sql left-key)))
+                          top  (here c)
+                          n    (count @rschema)
+                          base (alloc-regs! c n)]
+                      (doseq [i (range n)]
+                        (emit! c :HashColumn :p1 ht :p2 i :p3 (+ base i) :comment (str "r[" (+ base i) "] = " (@rschema i))))
+                      (consume (join-env lenv {:schema @rschema :regs (vec (range base (+ base n)))}))
+                      (emit! c :HashNext :p1 ht :p2 top :comment "next match")
+                      (patch! c seek :p3 (here c)))))))
+
+(defmethod compile-node :aggregate [c {:keys [group aggs child]} consume]
+  (let [a  (alloc-id! c :agg)
+        nk (count group)
+        na (count aggs)]
+    (emit! c :AggOpen :p1 a :p4 {:fns (mapv :fn aggs) :nkeys nk} :comment (str "GROUP BY table " a))
+    (compile-node c child
+                  (fn [env]
+                    (let [krs  (mapv #(compile-expr c % env) group)
+                          vrs  (mapv (fn [{:keys [arg]}] (if (= arg :*) (compile-expr c [:lit 1] env) (compile-expr c arg env))) aggs)
+                          kb   (alloc-regs! c nk)
+                          vb   (alloc-regs! c na)]
+                      (doseq [[i r] (map-indexed vector krs)] (emit! c :Copy :p1 r :p2 (+ kb i)))
+                      (doseq [[i r] (map-indexed vector vrs)] (emit! c :Copy :p1 r :p2 (+ vb i)))
+                      (emit! c :AggStep :p1 a :p2 kb :p3 nk :p4 vb :comment "accumulate into this row's group"))))
+    (let [rewind (emit! c :AggRewind :p1 a :comment "GROUP BY done: iterate groups")
+          top    (here c)
+          base   (alloc-regs! c (+ nk na))
+          names  (into (mapv out-name group) (map :name aggs))]
+      (doseq [[i nm] (map-indexed vector names)]
+        (emit! c :AggColumn :p1 a :p2 i :p3 (+ base i) :comment (str "r[" (+ base i) "] = " nm)))
+      (consume {:schema names :regs (vec (range base (+ base nk na)))})
+      (emit! c :AggNext :p1 a :p2 top :comment "next group")
+      (patch! c rewind :p2 (here c)))))
+
+(defmethod compile-node :sort [c {:keys [keys child]} consume]
+  (let [s      (alloc-id! c :sorter)
+        nk     (count keys)
+        schema (volatile! nil)]
+    (emit! c :SorterOpen :p1 s :p4 (vec (map-indexed (fn [i [_ dir]] [i (or dir :asc)]) keys))
+           :comment "ORDER BY buffer")
+    (compile-node c child
+                  (fn [env]
+                    (vreset! schema (:schema env))
+                    ;; sorter row layout: [sort keys…, columns…]
+                    (let [krs  (mapv #(compile-expr c (first %) env) keys)
+                          base (contiguous! c (into krs (:regs env)))]
+                      (emit! c :SorterInsert :p1 s :p2 base :p3 (+ nk (count (:regs env))) :comment "buffer row"))))
+    (let [sort-addr (emit! c :SorterSort :p1 s :comment "sort; if empty, skip")
+          top       (here c)
+          n         (count @schema)
+          base      (alloc-regs! c n)]
+      (doseq [i (range n)]
+        (emit! c :SorterColumn :p1 s :p2 (+ nk i) :p3 (+ base i) :comment (str "r[" (+ base i) "] = " (@schema i))))
+      (consume {:schema @schema :regs (vec (range base (+ base n)))})
+      (emit! c :SorterNext :p1 s :p2 top :comment "next sorted row")
+      (patch! c sort-addr :p2 (here c)))))
+
+(defmethod compile-node :limit [c {:keys [n child]} consume]
+  (let [counter (alloc-regs! c 1)]
+    (emit! c :Integer :p2 counter :p4 n :comment (str "LIMIT counter = " n))
+    (compile-node c child
+                  (fn [env]
+                    (consume env)
+                    (let [addr (emit! c :DecrJumpZero :p1 counter :comment "LIMIT reached → Halt")]
+                      (swap! c update :halt-patches conj addr))))))
+
+(defn compile-plan
+  "Compile a whole plan. The root's consume emits ResultRow — the instruction where the VM hands a
+  row back to its caller and pauses. Returns {:program [...] :columns [...]}.
+  `db` supplies table column lists for scans."
+  [plan db]
+  (let [c       (new-compiler)
+        columns (volatile! nil)
+        plan    (walk/postwalk
+                 (fn [x] (if (and (map? x) (= :scan (:op x))) (assoc x :columns (:columns (db (:table x)))) x))
+                 plan)]
+    (emit! c :Init :p2 1 :comment "start")
+    (compile-node c plan
+                  (fn [env]
+                    (vreset! columns (:schema env))
+                    (let [base (contiguous! c (:regs env))]
+                      (emit! c :ResultRow :p1 base :p2 (count (:regs env)) :comment "output a row (and pause)"))))
+    (let [halt (emit! c :Halt)]
+      (doseq [addr (:halt-patches @c)] (patch! c addr :p2 halt)))
+    {:program (:code @c) :columns @columns}))

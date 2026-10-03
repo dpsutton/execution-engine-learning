@@ -1,0 +1,34 @@
+package lesson02
+
+// Copied (compact) from lesson 1 so this lesson stands alone. Expressions here are already
+// compiled: a predicate is just a func(Row) bool, a projection a func(Row) Value — exactly what
+// lesson 1's Compile produces.
+
+import "fmt"
+
+// Value is one SQL value: nil (NULL), int64, float64, string, or bool.
+type Value = any
+
+// Row is positional: row[i] is the value of schema[i].
+type Row = []Value
+
+// Format prints a value: NULL, ints, floats with %.2f.
+func Format(v Value) string {
+	switch v := v.(type) {
+	case nil:
+		return "NULL"
+	case float64:
+		return fmt.Sprintf("%.2f", v)
+	}
+	return fmt.Sprint(v)
+}
+
+// Customers is the toy customers table (DESIGN.md).
+var CustomersSchema = []string{"customers.id", "customers.name", "customers.city", "customers.age"}
+
+var Customers = []Row{
+	{int64(1), "Ada", "Austin", int64(36)},
+	{int64(2), "Bo", "Boston", nil},
+	{int64(3), "Cy", "Austin", int64(52)},
+	{int64(4), "Di", "Denver", int64(29)},
+}

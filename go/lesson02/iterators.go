@@ -1,0 +1,184 @@
+// Package lesson02 is part 2: operators as pull iterators (the Volcano model).
+//
+// A query plan is a tree of operators. Every operator has the same three methods. The consumer at
+// the top calls Next; each operator calls Next on its child only when it needs another row. Rows
+// flow up one at a time, so nothing is materialized unless an operator has to (sorting, hashing —
+// later lessons), and an operator that has seen enough (Limit) simply stops asking.
+package lesson02
+
+import (
+	"fmt"
+	"io"
+	"strings"
+)
+
+// Operator is the iterator interface every node of a plan implements.
+type Operator interface {
+	Open()             // allocate state, open children
+	Next() (Row, bool) // the next row, or ok=false when exhausted
+	Close()            // release state, close children
+	Schema() []string  // names of the columns this operator produces
+}
+
+// ---------------------------------------------------------------------------------------------
+// Scan: the leaf. Hands out the rows of a table one at a time.
+// ---------------------------------------------------------------------------------------------
+
+type Scan struct {
+	Table    string
+	Cols     []string
+	Rows     []Row
+	pos      int
+	RowsRead int // how many rows this scan actually produced — the cost of the query, roughly
+}
+
+func (s *Scan) Open()            { s.pos = 0 }
+func (s *Scan) Close()           {}
+func (s *Scan) Schema() []string { return s.Cols }
+func (s *Scan) Next() (Row, bool) {
+	if s.pos >= len(s.Rows) {
+		return nil, false
+	}
+	r := s.Rows[s.pos]
+	s.pos++
+	s.RowsRead++
+	return r, true
+}
+
+// ---------------------------------------------------------------------------------------------
+// Filter: pull from the child until a row passes the predicate.
+// ---------------------------------------------------------------------------------------------
+
+type Filter struct {
+	Child Operator
+	Pred  func(Row) bool // a compiled WHERE clause: true only for exactly-true (lesson 1's Passes)
+}
+
+func (f *Filter) Open()            { f.Child.Open() }
+func (f *Filter) Close()           { f.Child.Close() }
+func (f *Filter) Schema() []string { return f.Child.Schema() }
+func (f *Filter) Next() (Row, bool) {
+	// EXERCISE(filter-next): Pull rows from the child until one passes the predicate; report exhaustion when the
+	// child runs out.
+	for {
+		r, ok := f.Child.Next()
+		if !ok {
+			return nil, false
+		}
+		if f.Pred(r) {
+			return r, true
+		}
+	}
+	// END EXERCISE
+}
+
+// ---------------------------------------------------------------------------------------------
+// Project: compute a new row from each child row.
+// ---------------------------------------------------------------------------------------------
+
+type Project struct {
+	Child Operator
+	Names []string
+	Exprs []func(Row) Value
+}
+
+func (p *Project) Open()            { p.Child.Open() }
+func (p *Project) Close()           { p.Child.Close() }
+func (p *Project) Schema() []string { return p.Names }
+func (p *Project) Next() (Row, bool) {
+	r, ok := p.Child.Next()
+	if !ok {
+		return nil, false
+	}
+	out := make(Row, len(p.Exprs))
+	for i, e := range p.Exprs {
+		out[i] = e(r)
+	}
+	return out, true
+}
+
+// ---------------------------------------------------------------------------------------------
+// Limit: count rows; once N have gone by, stop pulling. The child is never asked again.
+// ---------------------------------------------------------------------------------------------
+
+type Limit struct {
+	Child Operator
+	N     int
+	seen  int
+}
+
+func (l *Limit) Open()            { l.seen = 0; l.Child.Open() }
+func (l *Limit) Close()           { l.Child.Close() }
+func (l *Limit) Schema() []string { return l.Child.Schema() }
+func (l *Limit) Next() (Row, bool) {
+	// EXERCISE(limit-next): Pass rows through until N have been returned, then stop — without asking the child
+	// for another row.
+	if l.seen >= l.N {
+		return nil, false // note: no call to Child.Next — that's the whole trick
+	}
+	r, ok := l.Child.Next()
+	if ok {
+		l.seen++
+	}
+	return r, ok
+	// END EXERCISE
+}
+
+// ---------------------------------------------------------------------------------------------
+// Running a plan
+// ---------------------------------------------------------------------------------------------
+
+// Collect drives a plan to completion: Open, Next until exhausted, Close.
+func Collect(op Operator) []Row {
+	op.Open()
+	defer op.Close()
+	var out []Row
+	for {
+		r, ok := op.Next()
+		if !ok {
+			return out
+		}
+		out = append(out, r)
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Trace: wrap any operator to print every call, indented by depth in the plan.
+// ---------------------------------------------------------------------------------------------
+
+type Trace struct {
+	Child Operator
+	Label string
+	Depth int
+	Out   io.Writer
+}
+
+func (t *Trace) pad() string { return strings.Repeat("│  ", t.Depth) }
+
+func (t *Trace) Open() {
+	fmt.Fprintf(t.Out, "%s%s.Open()\n", t.pad(), t.Label)
+	t.Child.Open()
+}
+func (t *Trace) Close() {
+	fmt.Fprintf(t.Out, "%s%s.Close()\n", t.pad(), t.Label)
+	t.Child.Close()
+}
+func (t *Trace) Schema() []string { return t.Child.Schema() }
+func (t *Trace) Next() (Row, bool) {
+	fmt.Fprintf(t.Out, "%s%s.Next()\n", t.pad(), t.Label)
+	r, ok := t.Child.Next()
+	if ok {
+		fmt.Fprintf(t.Out, "%s└→ %s\n", t.pad(), formatRow(r))
+	} else {
+		fmt.Fprintf(t.Out, "%s└→ (done)\n", t.pad())
+	}
+	return r, ok
+}
+
+func formatRow(r Row) string {
+	parts := make([]string, len(r))
+	for i, v := range r {
+		parts[i] = Format(v)
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
+}

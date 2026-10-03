@@ -1,0 +1,278 @@
+(ns lesson01.expressions
+  "Lesson 1 — rows, values, and evaluating an expression tree.
+
+  A row is a vector of values. A schema is a vector of qualified
+  column names (\"customers.age\") giving each position a name. An
+  expression is a tree, written hiccup-style:
+
+      [:and [:> [:col \"age\"] [:lit 30]]
+            [:= [:col \"city\"] [:lit \"Austin\"]]]
+
+  Two ways to run it:
+
+  - `eval-expr` walks the tree for every row: look at the tag,
+  recurse, combine.
+
+  - `compile-expr` walks the tree ONCE and returns a
+  closure `(fn [row] ...)`. Column names are resolved to indexes at
+  compile time, and the per-node dispatch disappears into the shape of
+  the nested closures.
+
+  NULL (nil) follows SQL three-valued logic: comparisons with NULL are
+  NULL, `false AND NULL` is false, `true OR NULL` is true."
+  (:require [clojure.string :as str]))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Values
+
+(defn- number-value? [v] (or (instance? Long v) (instance? Double v) (instance? Integer v)))
+
+(defn- kind
+  "The value's kind, for comparisons: :number, :string, :boolean."
+  [v]
+  (cond (number-value? v) :number
+        (string? v)       :string
+        (boolean? v)      :boolean
+        :else             (throw (ex-info (str "unsupported value " (pr-str v)) {:value v}))))
+
+(defn compare-values
+  "Compare two non-NULL values: negative, zero, or positive. Ints and floats compare numerically,
+  strings lexicographically, false < true. Mixing other kinds is an error."
+  [a b]
+  (let [ka (kind a) kb (kind b)]
+    (when (not= ka kb)
+      (throw (ex-info (str "cannot compare " (pr-str a) " with " (pr-str b)) {:a a :b b})))
+    (case ka
+      :number (if (and (int? a) (int? b)) (compare (long a) (long b)) (compare (double a) (double b)))
+      (compare a b))))
+
+(defn arith
+  "Arithmetic with SQL semantics: NULL in → NULL out; int∘int stays int except `/`, which always
+  returns a float; division by zero → NULL."
+  [op a b]
+  ;; EXERCISE(eval-binary): Apply + - * / to two values with SQL rules: NULL in → NULL out,
+  ;; int∘int stays an int, anything with a float is a float, / always returns a float, x/0 → NULL.
+  (cond
+    (or (nil? a) (nil? b)) nil
+    (= op :/) (if (zero? (double b)) nil (/ (double a) (double b)))
+    (and (int? a) (int? b)) (case op :+ (+ a b) :- (- a b) :* (* a b))
+    :else (let [a (double a) b (double b)] (case op :+ (+ a b) :- (- a b) :* (* a b))))
+  ;; END EXERCISE
+  )
+
+(defn comparison
+  "`= != < <= > >=` → true/false, or NULL if either side is NULL."
+  [op a b]
+  (if (or (nil? a) (nil? b))
+    nil
+    (let [c (compare-values a b)]
+      (case op := (zero? c) :!= (not (zero? c)) :< (neg? c) :<= (<= c 0) :> (pos? c) :>= (>= c 0)))))
+
+(defn logic3
+  "AND (`op` :and) or OR (`op` :or) under SQL three-valued logic, where nil is NULL (unknown)."
+  [op a b]
+  ;; EXERCISE(and-or-3vl): AND: false wins, then NULL, then true. OR: true wins, then NULL, then false.
+  (case op
+    :and (cond (or (false? a) (false? b)) false
+               (or (nil? a) (nil? b))     nil
+               :else                      true)
+    :or  (cond (or (true? a) (true? b)) true
+               (or (nil? a) (nil? b))   nil
+               :else                    false))
+  ;; END EXERCISE
+  )
+
+(defn and3 "Three-valued AND." [a b] (logic3 :and a b))
+(defn or3 "Three-valued OR." [a b] (logic3 :or a b))
+
+(defn not3 [a] (if (nil? a) nil (not a)))
+
+(defn call-fn
+  "Scalar functions. NULL in → NULL out, except coalesce."
+  [fname args]
+  (if (= fname "coalesce")
+    (first (remove nil? args))
+    (let [x (first args)]
+      (when-not (nil? x)
+        (case fname
+          "lower"  (str/lower-case x)
+          "upper"  (str/upper-case x)
+          "length" (long (count x))
+          "abs"    (if (int? x) (Math/abs (long x)) (Math/abs (double x))))))))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Resolving column names
+
+(defn col-index
+  "Position of `col-name` in `schema`. Accepts a qualified name (\"customers.age\") or a bare one
+  (\"age\") when it's unambiguous."
+  [schema col-name]
+  (let [exact (keep-indexed (fn [i c] (when (= c col-name) i)) schema)
+        bare  (keep-indexed (fn [i c] (when (str/ends-with? c (str "." col-name)) i)) schema)]
+    (cond
+      (seq exact)       (first exact)
+      (= 1 (count bare)) (first bare)
+      (empty? bare)     (throw (ex-info (str "unknown column " col-name) {:schema schema}))
+      :else             (throw (ex-info (str "ambiguous column " col-name) {:schema schema})))))
+
+(def ^:private arith-ops #{:+ :- :* :/})
+(def ^:private cmp-ops #{:= :!= :< :<= :> :>=})
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Strategy 1: walk the tree for every row
+
+(defn eval-expr
+  "Evaluate `expr` against one `row` by walking the tree. Every call re-dispatches on every node and
+  re-resolves every column name — that's the cost compile-expr removes."
+  [expr schema row]
+  ;; EXERCISE(eval-tree): Look at the node's tag, evaluate its children recursively against `row`,
+  ;; and combine them (columns, literals, arithmetic, comparisons, AND/OR/NOT, IS NULL, functions).
+  (let [[tag & args] expr
+        ev           #(eval-expr % schema row)]
+    (cond
+      (= tag :col)            (nth row (col-index schema (first args)))
+      (= tag :lit)            (first args)
+      (arith-ops tag)         (arith tag (ev (first args)) (ev (second args)))
+      (cmp-ops tag)           (comparison tag (ev (first args)) (ev (second args)))
+      ;; AND/OR short-circuit only when the left side already decides the answer.
+      (= tag :and)            (let [l (ev (first args))] (if (false? l) false (and3 l (ev (second args)))))
+      (= tag :or)             (let [l (ev (first args))] (if (true? l) true (or3 l (ev (second args)))))
+      (= tag :not)            (not3 (ev (first args)))
+      (= tag :is-null)        (nil? (ev (first args)))
+      (= tag :is-not-null)    (some? (ev (first args)))
+      (= tag :fn)             (call-fn (first args) (mapv ev (rest args)))
+      :else (throw (ex-info (str "unknown expression " (pr-str expr)) {:expr expr}))))
+  ;; END EXERCISE
+  )
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Strategy 2: compile the tree into closures, once
+
+(defn compile-expr
+  "Turn `expr` into a function of one row. The tree is walked here, once; column names become
+  indexes; what's left at run time is a chain of closures calling closures."
+  [expr schema]
+  ;; EXERCISE(compile-closures): Walk the tree once, now, and return (fn [row] ...). Resolve column
+  ;; names to indexes here, so the returned closures only index into the row and combine results.
+  (let [[tag & args] expr
+        sub          #(compile-expr % schema)]
+    (cond
+      (= tag :col) (let [i (col-index schema (first args))] (fn [row] (nth row i)))
+      (= tag :lit) (let [v (first args)] (fn [_] v))
+      (arith-ops tag) (let [l (sub (first args)) r (sub (second args))]
+                        (fn [row] (arith tag (l row) (r row))))
+      (cmp-ops tag) (let [l (sub (first args)) r (sub (second args))]
+                      (fn [row] (comparison tag (l row) (r row))))
+      (= tag :and) (let [l (sub (first args)) r (sub (second args))]
+                     (fn [row] (let [a (l row)] (if (false? a) false (and3 a (r row))))))
+      (= tag :or) (let [l (sub (first args)) r (sub (second args))]
+                    (fn [row] (let [a (l row)] (if (true? a) true (or3 a (r row))))))
+      (= tag :not) (let [e (sub (first args))] (fn [row] (not3 (e row))))
+      (= tag :is-null) (let [e (sub (first args))] (fn [row] (nil? (e row))))
+      (= tag :is-not-null) (let [e (sub (first args))] (fn [row] (some? (e row))))
+      (= tag :fn) (let [fname (first args) as (mapv sub (rest args))]
+                    (fn [row] (call-fn fname (mapv #(% row) as))))
+      :else (throw (ex-info (str "unknown expression " (pr-str expr)) {:expr expr}))))
+  ;; END EXERCISE
+  )
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Printing
+
+(defn format-value [v]
+  (cond (nil? v)    "NULL"
+        (double? v) (format "%.2f" v)
+        (string? v) v
+        :else       (str v)))
+
+(defn expr->sql
+  "Render an expression back as SQL-ish text, for printing."
+  [expr]
+  (let [[tag & args] expr]
+    (case tag
+      :col (first args)
+      :lit (let [v (first args)] (cond (nil? v) "NULL" (string? v) (str "'" v "'") :else (str v)))
+      :not (str "NOT " (expr->sql (first args)))
+      :is-null (str (expr->sql (first args)) " IS NULL")
+      :is-not-null (str (expr->sql (first args)) " IS NOT NULL")
+      :fn (str (first args) "(" (str/join ", " (map expr->sql (rest args))) ")")
+      (str "(" (expr->sql (first args)) " " (str/upper-case (name tag)) " " (expr->sql (second args)) ")"))))
+
+(defn print-table
+  "Print rows under a header, columns padded to fit."
+  [columns rows]
+  (let [cells  (cons (vec columns) (map #(mapv format-value %) rows))
+        widths (apply map (fn [& col] (apply max (map count col))) cells)
+        line   (fn [r] (str/join " | " (map (fn [w c] (format (str "%-" w "s") c)) widths r)))]
+    (println (line (first cells)))
+    (println (str/join "-+-" (map #(apply str (repeat % "-")) widths)))
+    (doseq [r (rest cells)] (println (line r)))))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Toy data (DESIGN.md)
+
+(def customers-schema ["customers.id" "customers.name" "customers.city" "customers.age"])
+
+(def customers
+  [[1 "Ada" "Austin" 36]
+   [2 "Bo" "Boston" nil]
+   [3 "Cy" "Austin" 52]
+   [4 "Di" "Denver" 29]])
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Demo
+
+(defn- header [s] (println) (println (str "== " s " " (apply str (repeat (max 0 (- 70 (count s))) "=")))))
+
+(defn -main [& _]
+  (header "Rows and a schema")
+  (println "A row is a vector; the schema names each position.")
+  (print-table customers-schema customers)
+
+  (let [expr [:and [:> [:col "age"] [:lit 30]] [:= [:col "city"] [:lit "Austin"]]]]
+    (header "One expression, every row")
+    (println "expr:" (expr->sql expr))
+    (println "tree:" (pr-str expr))
+    (println)
+    (let [f (compile-expr expr customers-schema)]
+      (print-table ["name" "age" "city" "age > 30" "city = 'Austin'" "tree walk" "compiled"]
+                   (for [row customers]
+                     [(nth row 1) (nth row 3) (nth row 2)
+                      (eval-expr [:> [:col "age"] [:lit 30]] customers-schema row)
+                      (eval-expr [:= [:col "city"] [:lit "Austin"]] customers-schema row)
+                      (eval-expr expr customers-schema row)
+                      (f row)])))
+    (println)
+    (println "Bo's age is NULL, so `age > 30` is NULL, and NULL AND false = false.")
+    (println "A WHERE clause keeps a row only when the predicate is exactly true."))
+
+  (header "Three-valued logic")
+  (let [vs [true false nil]]
+    (print-table ["a" "b" "a AND b" "a OR b" "NOT a"]
+                 (for [a vs b vs] [a b (and3 a b) (or3 a b) (not3 a)])))
+
+  (header "Arithmetic rules")
+  (doseq [[e note] [[[:+ [:lit 2] [:lit 3]] "int + int → int"]
+                    [[:* [:lit 2] [:lit 1.5]] "int * float → float"]
+                    [[:/ [:lit 7] [:lit 2]] "/ always returns a float"]
+                    [[:/ [:lit 1] [:lit 0]] "division by zero → NULL"]
+                    [[:+ [:col "age"] [:lit 1]] "NULL + 1 → NULL (Bo's row)"]
+                    [[:fn "coalesce" [:col "age"] [:lit 0]] "coalesce skips NULLs"]]]
+    (println (format "  %-28s = %-6s  %s" (expr->sql e)
+                     (format-value (eval-expr e customers-schema (nth customers 1))) note)))
+
+  (header "Tree walking vs closures")
+  (let [expr  [:and [:> [:+ [:col "age"] [:lit 1]] [:lit 30]]
+               [:= [:fn "lower" [:col "city"]] [:lit "austin"]]]
+        rows  (vec (take 400000 (cycle customers)))
+        f     (compile-expr expr customers-schema)
+        time* (fn [g] (let [t0 (System/nanoTime)] (dotimes [_ 3] (doseq [r rows] (g r)))
+                        (/ (- (System/nanoTime) t0) 3e6)))]
+    (time* #(eval-expr expr customers-schema %))   ; warm up the JIT
+    (time* f)
+    (let [walk (time* #(eval-expr expr customers-schema %))
+          comp (time* f)]
+      (println (format "  %d rows, expr %s" (count rows) (expr->sql expr)))
+      (println (format "  tree walk: %7.1f ms   (dispatch on every node, look up every column name)" walk))
+      (println (format "  compiled:  %7.1f ms   (%.1fx faster: decisions made once, at compile time)"
+                       comp (/ walk comp))))))

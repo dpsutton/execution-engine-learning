@@ -1,0 +1,378 @@
+window.EE_EXERCISES = [
+ {
+  "id": "eval-binary",
+  "hint": "Evaluate both sides with Eval, then combine them: AND/OR use three-valued logic (Logic3); every other operator goes through ApplyBinary.",
+  "lines": 5,
+  "lang": "Go",
+  "lesson": "01",
+  "file": "go/exercises/lesson01/expressions.go"
+ },
+ {
+  "id": "compile-closures",
+  "hint": "Walk the tree once and return a closure per node. Resolve column names to positions now, so the returned function only indexes into the row.",
+  "lines": 38,
+  "lang": "Go",
+  "lesson": "01",
+  "file": "go/exercises/lesson01/expressions.go"
+ },
+ {
+  "id": "and-or-3vl",
+  "hint": "Return the deciding value if either side has it (false for AND, true for OR); otherwise NULL if either side is NULL; otherwise the ordinary boolean answer.",
+  "lines": 8,
+  "lang": "Go",
+  "lesson": "01",
+  "file": "go/exercises/lesson01/expressions.go"
+ },
+ {
+  "id": "filter-next",
+  "hint": "Pull rows from the child until one passes the predicate; report exhaustion when the child runs out.",
+  "lines": 9,
+  "lang": "Go",
+  "lesson": "02",
+  "file": "go/exercises/lesson02/iterators.go"
+ },
+ {
+  "id": "limit-next",
+  "hint": "Pass rows through until N have been returned, then stop \u2014 without asking the child for another row.",
+  "lines": 8,
+  "lang": "Go",
+  "lesson": "02",
+  "file": "go/exercises/lesson02/iterators.go"
+ },
+ {
+  "id": "nl-join-next",
+  "hint": "For each outer row, rewind and walk the whole inner side, emitting concatenated rows that pass Pred; for LEFT OUTER, emit the outer row padded with NULLs if nothing matched.",
+  "lines": 26,
+  "lang": "Go",
+  "lesson": "03",
+  "file": "go/exercises/lesson03/joins.go"
+ },
+ {
+  "id": "hash-join-build",
+  "hint": "Read the entire right side into a hash table keyed on RightKey (skipping NULL keys), counting BuildRows; then open the left side for probing. Build phase: a pipeline breaker. Nothing comes out until the right side is fully read.",
+  "lines": 12,
+  "lang": "Go",
+  "lesson": "03",
+  "file": "go/exercises/lesson03/joins.go"
+ },
+ {
+  "id": "hash-join-probe",
+  "hint": "For the current probe row, look its key up in the table built in Open and emit one joined row per match; pad with NULLs for left outer when nothing matched.",
+  "lines": 24,
+  "lang": "Go",
+  "lesson": "03",
+  "file": "go/exercises/lesson03/joins.go"
+ },
+ {
+  "id": "merge-join-next",
+  "hint": "Both inputs are sorted on the key. Advance whichever side is behind; when keys are equal, buffer the right side's group of equal keys and pair it with every left row carrying that key.",
+  "lines": 45,
+  "lang": "Go",
+  "lesson": "03",
+  "file": "go/exercises/lesson03/joins.go"
+ },
+ {
+  "id": "hash-aggregate",
+  "hint": "Read the whole child. Find or create each row's group in a hash table (remembering first-seen order) and step its accumulators; then emit one row per group. No GROUP BY over empty input still yields one row.",
+  "lines": 31,
+  "lang": "Go",
+  "lesson": "04",
+  "file": "go/exercises/lesson04/aggregation.go"
+ },
+ {
+  "id": "external-sort-merge",
+  "hint": "The heap holds the smallest unread row of every run. Pop the smallest, refill the heap from the run it came from, and return it.",
+  "lines": 9,
+  "lang": "Go",
+  "lesson": "04",
+  "file": "go/exercises/lesson04/aggregation.go"
+ },
+ {
+  "id": "top-n",
+  "hint": "Keep only the best N rows seen so far in a heap with the worst on top; a better row replaces the top (count Evictions). At the end, sort what's left for output.",
+  "lines": 22,
+  "lang": "Go",
+  "lesson": "04",
+  "file": "go/exercises/lesson04/aggregation.go"
+ },
+ {
+  "id": "btree-split",
+  "hint": "Insert into the right leaf (extending the posting list if the key exists). When a node overflows, split it in half and return the separator and new right sibling to the parent: leaves copy their first right key up, internal nodes move the middle key up.",
+  "lines": 40,
+  "lang": "Go",
+  "lesson": "05",
+  "file": "go/exercises/lesson05/btree.go"
+ },
+ {
+  "id": "btree-search",
+  "hint": "Descend from the root to the leaf that could hold key, choosing a child at each internal node; count every node visited.",
+  "lines": 7,
+  "lang": "Go",
+  "lesson": "05",
+  "file": "go/exercises/lesson05/btree.go"
+ },
+ {
+  "id": "btree-range",
+  "hint": "Find the starting leaf (or the leftmost one), then walk the leaf chain collecting row ids for keys inside the bounds, stopping at the first key past hi. Count node visits.",
+  "lines": 31,
+  "lang": "Go",
+  "lesson": "05",
+  "file": "go/exercises/lesson05/btree.go"
+ },
+ {
+  "id": "join-order-dp",
+  "hint": "For subset sizes 2..n, for each subset S and each table t in it, extend Best[S\u2212{t}] by joining t (joinPreds, orient, joinCandidates) and keep the cheapest candidate in Best[S]. Skip cross products when another order could use a join predicate.",
+  "lines": 29,
+  "lang": "Go",
+  "lesson": "06",
+  "file": "go/exercises/lesson06/planner.go"
+ },
+ {
+  "id": "eq-selectivity",
+  "hint": "Assume uniformity: every distinct value is equally common, and NULLs never match. Use Rows, Nulls and NDV; guard against an empty or all-NULL column.",
+  "lines": 5,
+  "lang": "Go",
+  "lesson": "06",
+  "file": "go/exercises/lesson06/stats.go"
+ },
+ {
+  "id": "join-cardinality",
+  "hint": "Every value on the side with fewer distinct values finds a partner on the other side (containment), so each row matches 1/max(ndv(a), ndv(b)) of the other side's rows.",
+  "lines": 1,
+  "lang": "Go",
+  "lesson": "06",
+  "file": "go/exercises/lesson06/stats.go"
+ },
+ {
+  "id": "range-selectivity",
+  "hint": "Walk the equi-depth histogram: buckets entirely below v count fully; the bucket that contains v counts in proportion to where v falls inside it. Return a fraction of all rows.",
+  "lines": 27,
+  "lang": "Go",
+  "lesson": "06",
+  "file": "go/exercises/lesson06/stats.go"
+ },
+ {
+  "id": "compile-filter",
+  "hint": "Produce the child. In its consume callback, compile the predicate into a register, emit an IfNot that jumps past this row's code, call consume, and then patch the jump's target to the address after it.",
+  "lines": 7,
+  "lang": "Go",
+  "lesson": "07",
+  "file": "go/exercises/lesson07/compiler.go"
+ },
+ {
+  "id": "compile-nl-join",
+  "hint": "Produce the left child; inside its consume, produce the right child, so its loop nests inside. With both rows in registers, test the ON predicate (if any) like a filter and consume the concatenated registers.",
+  "lines": 14,
+  "lang": "Go",
+  "lesson": "07",
+  "file": "go/exercises/lesson07/compiler.go"
+ },
+ {
+  "id": "vm-step-loop",
+  "hint": "Fetch\u2013execute until fuel runs out: advance PC before executing (jumps overwrite it). Halt ends the program; ResultRow returns a copy of its registers as a row (PC already points past it, so the next Step resumes there); everything else goes to exec.",
+  "lines": 22,
+  "lang": "Go",
+  "lesson": "07",
+  "file": "go/exercises/lesson07/vm.go"
+ },
+ {
+  "id": "vm-cursor-ops",
+  "hint": "OpenScan points a cursor at a table; Rewind moves it to row 0 (or jumps to P2 if the table is empty); Column copies column P2 of the current row into register P3; Next advances and jumps back to P2 while rows remain.",
+  "lines": 20,
+  "lang": "Go",
+  "lesson": "07",
+  "file": "go/exercises/lesson07/vm.go"
+ },
+ {
+  "id": "eval-binary",
+  "hint": "Apply + - * / to two values with SQL rules: NULL in \u2192 NULL out, int\u2218int stays an int, anything with a float is a float, / always returns a float, x/0 \u2192 NULL.",
+  "lines": 5,
+  "lang": "Clojure",
+  "lesson": "01",
+  "file": "clojure/ex/exercises/lesson01/expressions.clj"
+ },
+ {
+  "id": "and-or-3vl",
+  "hint": "AND: false wins, then NULL, then true. OR: true wins, then NULL, then false.",
+  "lines": 7,
+  "lang": "Clojure",
+  "lesson": "01",
+  "file": "clojure/ex/exercises/lesson01/expressions.clj"
+ },
+ {
+  "id": "eval-tree",
+  "hint": "Look at the node's tag, evaluate its children recursively against `row`, and combine them (columns, literals, arithmetic, comparisons, AND/OR/NOT, IS NULL, functions).",
+  "lines": 15,
+  "lang": "Clojure",
+  "lesson": "01",
+  "file": "clojure/ex/exercises/lesson01/expressions.clj"
+ },
+ {
+  "id": "compile-closures",
+  "hint": "Walk the tree once, now, and return (fn [row] ...). Resolve column names to indexes here, so the returned closures only index into the row and combine results.",
+  "lines": 19,
+  "lang": "Clojure",
+  "lesson": "01",
+  "file": "clojure/ex/exercises/lesson01/expressions.clj"
+ },
+ {
+  "id": "filter-next",
+  "hint": "Pull rows from the child until one makes the predicate exactly true and return it; return nil when the child runs out.",
+  "lines": 3,
+  "lang": "Clojure",
+  "lesson": "02",
+  "file": "clojure/ex/exercises/lesson02/iterators.clj"
+ },
+ {
+  "id": "limit-next",
+  "hint": "Pass child rows through until n have been returned; after that, return nil WITHOUT asking the child for another row.",
+  "lines": 2,
+  "lang": "Clojure",
+  "lesson": "02",
+  "file": "clojure/ex/exercises/lesson02/iterators.clj"
+ },
+ {
+  "id": "nl-join-next",
+  "hint": "For the current outer (left) row, scan the inner (right) side from the top and return each combined row where the predicate is true; then advance the outer row. For :left, emit the outer row padded with NULLs if nothing matched. Count each test in :comparisons.",
+  "lines": 19,
+  "lang": "Clojure",
+  "lesson": "03",
+  "file": "clojure/ex/exercises/lesson03/joins.clj"
+ },
+ {
+  "id": "hash-join-build",
+  "hint": "Drain the right child into @table: a map from (hash-key key) to the vector of right rows with that key, in arrival order. Skip NULL keys; count :build-rows.",
+  "lines": 6,
+  "lang": "Clojure",
+  "lesson": "03",
+  "file": "clojure/ex/exercises/lesson03/joins.clj"
+ },
+ {
+  "id": "hash-join-probe",
+  "hint": "For each left row, look its key up in @table and emit one joined row per match (buffer them in `pending`); pad with NULLs for :left when nothing matched. NULL keys never match. Count :probes and :comparisons (bucket size).",
+  "lines": 12,
+  "lang": "Clojure",
+  "lesson": "03",
+  "file": "clojure/ex/exercises/lesson03/joins.clj"
+ },
+ {
+  "id": "merge-join-next",
+  "hint": "Both inputs are sorted. For each left key, skip right rows with smaller keys, gather the group of right rows with an equal key (reuse it if the next left row has the same key), and emit the left row joined with each. Compare keys with `cmp`.",
+  "lines": 22,
+  "lang": "Clojure",
+  "lesson": "03",
+  "file": "clojure/ex/exercises/lesson03/joins.clj"
+ },
+ {
+  "id": "hash-aggregate",
+  "hint": "Drain the child. For each row compute its group key, find (or create) that group's accumulators, and step each one with its aggregate's input value. Then close the child and put the finished rows (key ++ finalized aggregates) in @result, in first-seen order. No GROUP BY and no input still yields one row.",
+  "lines": 13,
+  "lang": "Clojure",
+  "lesson": "04",
+  "file": "clojure/ex/exercises/lesson04/aggregation.clj"
+ },
+ {
+  "id": "external-sort-merge",
+  "hint": "The heap holds [row run-index position] for the head of each run. Take the smallest, push the next row from the same run (if any), and return the row taken. Count :heap-pops in `stats`.",
+  "lines": 6,
+  "lang": "Clojure",
+  "lesson": "04",
+  "file": "clojure/ex/exercises/lesson04/aggregation.clj"
+ },
+ {
+  "id": "top-n",
+  "hint": "Read every child row as [row seq-no]. Keep at most n entries in `pq`, whose head is the worst kept: fill it up, then replace the head only when a new row is strictly better.",
+  "lines": 7,
+  "lang": "Clojure",
+  "lesson": "04",
+  "file": "clojure/ex/exercises/lesson04/aggregation.clj"
+ },
+ {
+  "id": "btree-split",
+  "hint": "Move the upper half of the leaf's keys/vals to a new page (alloc), keep the lower half in page `id`, and fix the :next links so the leaf chain stays in order. Return [tree {:key first-key-of-right-half :right new-page-id}] for the parent.",
+  "lines": 5,
+  "lang": "Clojure",
+  "lesson": "05",
+  "file": "clojure/ex/exercises/lesson05/btree.clj"
+ },
+ {
+  "id": "btree-search",
+  "hint": "Start at the root page. At an internal page, follow the child whose key range holds k (keys equal to a separator go right: upper-bound); nil k means leftmost. Stop at a leaf. Count every page you read.",
+  "lines": 5,
+  "lang": "Clojure",
+  "lesson": "05",
+  "file": "clojure/ex/exercises/lesson05/btree.clj"
+ },
+ {
+  "id": "btree-range",
+  "hint": "Descend once to the leaf where lo would be, then walk forward collecting [key row-ids] until a key passes hi, following :next to the following leaf page when one runs out.",
+  "lines": 11,
+  "lang": "Clojure",
+  "lesson": "05",
+  "file": "clojure/ex/exercises/lesson05/btree.clj"
+ },
+ {
+  "id": "range-selectivity",
+  "hint": "Sum the histogram: buckets entirely below v count fully, buckets at or above v count nothing, and the bucket straddling v counts the fraction of its [lo, hi] span below v.",
+  "lines": 8,
+  "lang": "Clojure",
+  "lesson": "06",
+  "file": "clojure/ex/exercises/lesson06/planner.clj"
+ },
+ {
+  "id": "eq-selectivity",
+  "hint": "Assume every distinct non-NULL value is equally common: non-NULL rows spread evenly over ndv values (0.0 when there are no distinct values).",
+  "lines": 1,
+  "lang": "Clojure",
+  "lesson": "06",
+  "file": "clojure/ex/exercises/lesson06/planner.clj"
+ },
+ {
+  "id": "join-cardinality",
+  "hint": "Each value on the side with fewer distinct values finds its partners on the other side: 1 / max(ndv(l), ndv(r)) (guard against 0).",
+  "lines": 1,
+  "lang": "Clojure",
+  "lesson": "06",
+  "file": "clojure/ex/exercises/lesson06/planner.clj"
+ },
+ {
+  "id": "join-order-dp",
+  "hint": "Starting from best1 (one relation each), for k = 2..n and every k-subset s, try adding each r in s to the best plan for (s \u2212 r) via join-candidates; prefer candidates with a join edge; keep the cheapest per s. Count candidates in `considered`.",
+  "lines": 14,
+  "lang": "Clojure",
+  "lesson": "06",
+  "file": "clojure/ex/exercises/lesson06/planner.clj"
+ },
+ {
+  "id": "compile-filter",
+  "hint": "Have the child produce rows; for each, emit code computing pred, an IfNot that skips the row, then the parent's consume. Patch the IfNot's jump target to just after it.",
+  "lines": 6,
+  "lang": "Clojure",
+  "lesson": "07",
+  "file": "clojure/ex/exercises/lesson07/compiler.clj"
+ },
+ {
+  "id": "compile-nl-join",
+  "hint": "Emit the right side's loop INSIDE the left side's consume. In the inner consume, combine both envs (join-env), test pred like a filter, and call the parent's consume.",
+  "lines": 9,
+  "lang": "Clojure",
+  "lesson": "07",
+  "file": "clojure/ex/exercises/lesson07/compiler.clj"
+ },
+ {
+  "id": "vm-result-row",
+  "hint": "Hand a row to the caller: put the values of registers p1 .. p1+p2-1 under :out. (pc has already moved past this instruction, so resuming continues after it.)",
+  "lines": 1,
+  "lang": "Clojure",
+  "lesson": "07",
+  "file": "clojure/ex/exercises/lesson07/vm.clj"
+ },
+ {
+  "id": "vm-step-loop",
+  "hint": "Call `step` repeatedly. Stop with :done once halted, :out-of-fuel after `fuel` instructions, or :row as soon as a step leaves a row under :out (remove it from the returned state).",
+  "lines": 8,
+  "lang": "Clojure",
+  "lesson": "07",
+  "file": "clojure/ex/exercises/lesson07/vm.clj"
+ }
+];

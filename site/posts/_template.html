@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Part N · Title — Execution Engine</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/common.js"></script>
+<!-- one script per post for its visualizations; each finds its mount points by id -->
+<script src="../assets/viz/NN-slug.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Execution Engine</a>
+  <span>Part N of 7</span>
+  <span class="spacer"></span>
+  <button class="theme-toggle" type="button">◐ auto</button>
+</header>
+
+<article>
+  <div class="kicker">Part N · Slug</div>
+  <h1>Title</h1>
+  <p class="dek">One or two sentences: what you'll understand by the end.</p>
+
+  <p>Prose…</p>
+
+  <h2>Section</h2>
+
+  <!-- Pseudocode: plain text; common.js highlights keywords, -- comments, strings, calls. -->
+<pre class="pseudo">function eval(expr, row)
+  match expr
+    case Col(i)    -> return row[i]      -- read a column
+    case Lit(v)    -> return v
+</pre>
+  <p class="caption">Caption under a code block or figure.</p>
+
+  <!-- Interactive visualization: a mount point the post's viz script replaces via EE.frame("#viz-x", ...). -->
+  <div id="viz-example"></div>
+
+  <div class="sqlglot"><p>How sqlglot's Python executor handles the same thing.</p></div>
+  <div class="code-ref"><p><code>go/lessonNN/…</code> · <code>clojure/src/lessonNN/….clj</code> — run with
+    <code>go run ./cmd/lessonNN</code> / <code>clojure -M -m lessonNN.slug</code>.</p></div>
+  <div class="aside"><p>A tangent worth knowing.</p></div>
+  <div class="takeaway"><p>The one thing to remember.</p></div>
+
+  <div data-series></div>
+</article>
+</body>
+</html>

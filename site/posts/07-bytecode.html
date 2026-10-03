@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Part 7 · Bytecode — Execution Engine</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/common.js"></script>
+<script src="../assets/viz/07-bytecode.js" defer></script>
+<style>
+  .vm-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 1.1rem; }
+  .pc-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 1.1rem; align-items: start; }
+  @media (max-width: 820px) { .vm-grid, .pc-grid { grid-template-columns: 1fr; } }
+  .vm-sql { margin: 0 0 .7rem; font-size: .78rem; padding: .6rem .8rem; border-left: 3px solid var(--accent); }
+  .vm-listing { max-height: 26rem; overflow: auto; border: 1px solid var(--rule); border-radius: 8px; position: relative; }
+  .vm-listing.tall { max-height: 34rem; }
+  .vm-listing thead th { position: sticky; top: 0; background: var(--bg-sunk); font-family: var(--sans); font-size: .7rem; padding: .3rem .5rem; }
+  .vm-listing tr { transition: opacity .15s; }
+  .vm-state h4 { font: 600 .72rem/1 var(--sans); text-transform: uppercase; letter-spacing: .08em; color: var(--ink-faint); margin: .9rem 0 .45rem; }
+  .vm-state h4:first-child { margin-top: 0; }
+  .vm-regs { display: flex; flex-wrap: wrap; gap: .3rem; }
+  .vm-reg { font: .74rem/1 var(--mono); padding: .3rem .4rem; border-radius: 5px; background: var(--bg-sunk); border: 1px solid transparent; min-width: 3.4rem; }
+  .vm-reg i { font-style: normal; color: var(--violet); margin-right: .3rem; font-size: .68rem; }
+  .vm-reg.empty { color: var(--ink-faint); }
+  .vm-reg.changed { border-color: var(--accent); background: var(--accent-soft); }
+  .vm-panel { display: flex; flex-direction: column; gap: .5rem; overflow-x: auto; }
+  .vm-cursor { display: flex; flex-direction: column; gap: .25rem; }
+  .vm-snap { margin: 1rem 0 0; max-height: 16rem; font-size: .7rem; border-left: 3px solid var(--violet); white-space: pre-wrap; word-break: break-all; }
+  .pc-tree { overflow-x: auto; }
+  .pc-node text { pointer-events: none; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 0 0 1.4rem; }
+  .two-col pre { margin: 0; font-size: .76rem; height: 100%; }
+  .two-col h4 { font: 600 .78rem/1 var(--sans); margin: 0 0 .4rem; color: var(--ink-soft); }
+  @media (max-width: 640px) { .two-col { grid-template-columns: 1fr; } }
+  table.compare td:first-child { font-family: var(--sans); font-weight: 600; }
+  table.compare td { font-family: var(--sans); font-size: .82rem; }
+  .yes { color: var(--good); font-weight: 600; } .no { color: var(--bad); font-weight: 600; } .meh { color: var(--ink-soft); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Execution Engine</a>
+  <span>Part 7 of 7</span>
+  <span class="spacer"></span>
+  <button class="theme-toggle" type="button">◐ auto</button>
+</header>
+
+<article>
+  <div class="kicker">Part 7 · Bytecode</div>
+  <h1>Compiling plans to a resumable VM</h1>
+  <p class="dek">SQLite doesn't walk a plan tree. It compiles the query into a flat program for a register
+    machine and runs that one instruction at a time. Because all of that machine's state is plain data,
+    you can stop a query anywhere, save it, and pick it up later.</p>
+
+  <div data-warmup></div>
+
+  <p>Every executor so far has been a tree of objects. In part 2 each operator had a <code>Next()</code>
+    that called its child's <code>Next()</code>. A row came back up through the stack, and the stack
+    itself held where we were: which outer row the join was on, how far into the inner input it had
+    got, how many rows the limit had already passed. That works, and it's how Postgres runs queries.
+    But part of the query's state lives in the host language's call stack, and you can't hand a call
+    stack to someone else.</p>
+
+  <p>This part takes the other path. We compile the physical plan from part 6 into a program for a
+    small virtual machine: a flat list of instructions, a program counter, numbered registers, and a
+    few cursors and ephemeral tables. Then we look at what that buys us: pausing after any
+    instruction, a budget measured in instructions, and snapshots you can write to disk and restore
+    into a different VM.</p>
+
+  <h2>Reading SQLite's bytecode</h2>
+
+  <p>Start with the real thing. SQLite's <code>EXPLAIN</code> prints the program it would run. Here is
+    a small aggregate query:</p>
+
+<pre><code>sqlite&gt; create table t(a int, b int);
+sqlite&gt; explain select a, sum(b) from t where b &gt; 10 group by a;
+addr  opcode         p1    p2    p3    p4             p5  comment
+----  -------------  ----  ----  ----  -------------  --  -------------
+0     Init           0     45    0                    0   Start at 45
+1     SorterOpen     1     2     0     k(1,B)         0
+2     Integer        0     2     0                    0   r[2]=0; clear abort flag
+3     Null           0     5     5                    0   r[5..5]=NULL
+4     Gosub          4     41    0                    0
+5     OpenRead       0     2     0     2              0   root=2 iDb=0; t
+6     Rewind         0     14    0                    0
+7       Column         0     1     7                    0   r[7]= cursor 0 column 1
+8       Le             8     13    7     BINARY-8       84  if r[7]&lt;=r[8] goto 13
+9       Column         0     0     12                   0   r[12]= cursor 0 column 0
+10      Column         0     1     13                   0   r[13]= cursor 0 column 1
+11      MakeRecord     12    2     7                    0   r[7]=mkrec(r[12..13])
+12      SorterInsert   1     7     0                    0   key=r[7]
+13    Next           0     7     0                    1
+14    OpenPseudo     2     7     2                    0   2 columns in r[7]
+15    SorterSort     1     44    0                    0   GROUP BY sort
+16      SorterData     1     7     2                    0   r[7]=data
+17      Column         2     0     6                    0   r[6]= cursor 2 column 0
+18      Compare        5     6     1     k(1,B)         0   r[5] &lt;-&gt; r[6]
+19      Jump           20    24    20                   0
+20      Move           6     5     1                    0   r[5]=r[6]
+21      Gosub          3     34    0                    0   output one row
+22      IfPos          2     44    0                    0   if r[2]&gt;0 then r[2]-=0, goto 44; check abort flag
+23      Gosub          4     41    0                    0   reset accumulator
+24      Column         2     1     14                   0   r[14]=t.b
+25      AggStep        0     14    11    sum(1)         1   accum=r[11] step(r[14])
+26      If             1     28    0                    0
+27      Column         2     0     9                    0   r[9]=t.a
+28      Integer        1     1     0                    0   r[1]=1; indicate data in accumulator
+29    SorterNext     1     16    0                    0
+30    Gosub          3     34    0                    0   output final row
+31    Goto           0     44    0                    0
+32    Integer        1     2     0                    0   r[2]=1; set abort flag
+33    Return         3     0     0                    0
+34    IfPos          1     36    0                    0   if r[1]&gt;0 then r[1]-=0, goto 36; Groupby result generator entry point
+35    Return         3     0     0                    0
+36    AggFinal       11    1     0     sum(1)         0   accum=r[11] N=1
+37    Copy           9     15    0                    0   r[15]=r[9]
+38    Copy           11    16    0                    0   r[16]=r[11]
+39    ResultRow      15    2     0                    0   output=r[15..16]
+40    Return         3     0     0                    0   end groupby result generator
+41    Null           0     9     11                   0   r[9..11]=NULL
+42    Integer        0     1     0                    0   r[1]=0; indicate accumulator empty
+43    Return         4     0     0                    0
+44    Halt           0     0     0                    0
+45    Transaction    0     0     1     0              1   usesStmtJournal=0
+46    Integer        10    8     0                    0   r[8]=10
+47    Goto           0     1     0                    0</code></pre>
+  <p class="caption">SQLite 3 output, unedited. Each instruction has up to five operands; most are register numbers, cursor numbers, or jump targets.</p>
+
+  <p>It looks dense, but it breaks into a few blocks:</p>
+
+  <div class="table-wrap"><table class="data">
+    <thead><tr><th>addrs</th><th>what it is</th></tr></thead>
+    <tbody>
+      <tr><td>0, 45–47</td><td><strong>Prologue.</strong> <code>Init</code> jumps to the end, which starts a read transaction, loads the constant <code>10</code> into <code>r8</code> once, and jumps back to 1. Constants are hoisted out of every loop.</td></tr>
+      <tr><td>1–4</td><td><strong>Setup.</strong> Open a <em>sorter</em> (an ephemeral sorted table), clear the abort flag, set "previous group key" <code>r5</code> to NULL, call the reset-accumulator subroutine.</td></tr>
+      <tr><td>5–13</td><td><strong>The scan loop.</strong> Open cursor 0 on <code>t</code>; <code>Rewind</code> (jump to 14 if empty); read column <code>b</code>; <code>Le</code> is the WHERE clause, inverted: if <code>b &lt;= 10</code> jump to 13 and skip the row. Otherwise pack <code>(a, b)</code> into a record and insert it into the sorter. <code>Next</code> jumps back to 7 while rows remain.</td></tr>
+      <tr><td>14–15</td><td><strong>Pipeline break.</strong> Sort the sorter. This is the point where every input row must have been seen.</td></tr>
+      <tr><td>16–29</td><td><strong>The group loop.</strong> Walk sorted records. <code>Compare</code> the current <code>a</code> against the previous group key. On a change: emit the previous group (<code>Gosub 34</code>) and reset the accumulator (<code>Gosub 41</code>). Then <code>AggStep</code> adds <code>b</code> into <code>sum</code>.</td></tr>
+      <tr><td>30–31</td><td>Emit the last group, then halt.</td></tr>
+      <tr><td>34–40</td><td><strong>Output subroutine.</strong> If the accumulator has data: finalize <code>sum</code>, copy key + sum into contiguous registers 15–16, <code>ResultRow</code>.</td></tr>
+      <tr><td>41–43</td><td><strong>Reset subroutine.</strong> NULL the accumulator registers, mark it empty.</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>Three things to notice.</p>
+
+  <ol>
+    <li><strong>The plan has become control flow.</strong> There is no Scan or Aggregate object
+      anywhere. The scan is the loop from 6 to 13, the WHERE clause is a conditional jump, and the
+      GROUP BY is a sort followed by a loop that detects key changes. (SQLite chose a sort-based
+      aggregate here, the "sort aggregate" from part 4, because there's no index on <code>a</code>
+      to deliver rows in order.)</li>
+    <li><strong>Even the subroutine calls are in registers.</strong> <code>Gosub 3 34</code> stores
+      the return address in <code>r3</code> and jumps; <code>Return 3</code> jumps to whatever
+      <code>r3</code> holds. Nothing lives on the C call stack between instructions.</li>
+    <li><strong><code>ResultRow</code> is where the VM yields.</strong> When execution reaches
+      address 39, <code>sqlite3_step()</code> saves the program counter (40), points the caller at
+      registers 15–16, and returns <code>SQLITE_ROW</code>. The next call to <code>sqlite3_step()</code>
+      continues the interpreter loop at address 40, with no extra machinery.</li>
+  </ol>
+
+  <h2>Our machine</h2>
+
+  <p>Our VM is a smaller cousin of SQLite's, with the instruction set from <code>DESIGN.md</code>. Its
+    entire state is:</p>
+
+<pre class="pseudo">struct VMState
+  pc          int                    -- address of the next instruction
+  regs        map[int]Value          -- numbered registers
+  cursors     map[int]{table, pos}   -- a cursor over immutable data is just two numbers
+  hashTables  map[int]{buckets, seek}   -- ephemeral: join build sides
+  aggTables   map[int]{groups, it}      -- ephemeral: GROUP BY accumulators
+  halted      bool
+</pre>
+
+  <p>Every field is plain data: ints, values, maps of rows. No closures, no iterator objects, no
+    pointers into the host's stack. The interpreter is a loop around a <code>switch</code>:</p>
+
+<pre class="pseudo">function step(prog, db, s, fuel) -> (row, status)
+  loop
+    if s.halted then return (null, Done)
+    if fuel == 0 then return (null, OutOfFuel)      -- budget exhausted, state intact
+    fuel = fuel - 1
+    ins  = prog[s.pc]
+    next = s.pc + 1
+    match ins.op
+      case Column    -> s.regs[ins.p3] = db[cursor.table].rows[cursor.pos][ins.p2]
+      case Gt        -> s.regs[ins.p3] = compare3(s.regs[ins.p1], s.regs[ins.p2])
+      case IfNot     -> if s.regs[ins.p1] != true then next = ins.p2
+      case Next      -> cursor.pos += 1; if cursor.pos &lt; len(rows) then next = ins.p2
+      case HashSeek  -> if no bucket for s.regs[ins.p2] then next = ins.p3
+      case ResultRow ->
+        s.pc = next                                    -- advance first: resume AFTER the yield
+        return (s.regs[ins.p1 .. ins.p1+ins.p2), Row)
+      case Halt      -> s.halted = true; return (null, Done)
+      ...
+    s.pc = next
+</pre>
+
+  <p>There are two ways out of the loop besides halting: a row is ready, or the fuel ran out. Both
+    leave <code>s</code> in a state that the next <code>step()</code> call continues from. The caller
+    never has to know which instruction the VM was in the middle of. It wasn't in the middle of one,
+    because instructions are atomic.</p>
+
+  <h2>Compiling a plan: produce and consume</h2>
+
+  <p>How do you get from a plan tree to a flat program? The trick is Thomas Neumann's
+    <em>produce/consume</em> model (the HyPer paper in the reading list). SQLite's code generator has
+    the same shape, though it doesn't use the names. Each operator gets one compile function:</p>
+
+<pre class="pseudo">gen(node, consume)
+  -- emit code that produces node's rows, one at a time.
+  -- for each row, call consume(regs): a callback that emits the code to run
+  -- while that row sits in those registers.
+</pre>
+
+  <p><code>consume</code> is a compile-time callback, not a runtime one. When <code>gen</code> calls
+    it, the parent operator's code is emitted <em>in place</em>, inside the child's loop. The
+    operators nest at compile time so that at run time there's just one flat loop:</p>
+
+<pre class="pseudo">gen(Scan(table), consume)
+  emit OpenScan c, table
+  emit Rewind c, done                   -- empty? skip the loop
+  top:
+  for each column i: emit Column c, i, r[base+i]
+  consume(r[base ..])                   -- parent's code goes HERE, inside the loop
+  emit Next c, top
+  done:
+
+gen(Filter(pred, child), consume)
+  gen(child, regs ->
+    r = genExpr(pred, regs)
+    emit IfNot r, skip
+    consume(regs)                       -- only reached when pred is true
+    skip:)
+
+gen(Limit(n, child), consume)
+  counter = constReg(n)
+  gen(child, regs ->
+    consume(regs)
+    emit DecrJumpZero counter, halt)    -- n rows out? jump straight to Halt
+
+gen(HashJoin(left, right, lkey, rkey), consume)
+  emit HashOpen h
+  gen(right, regs ->                    -- build: a complete loop of its own
+    emit HashInsert h, genExpr(rkey, regs), regs)
+  gen(left, regs ->                     -- probe: runs inside the left loop
+    emit HashSeek h, genExpr(lkey, regs), none
+    top:
+    for each right column i: emit HashColumn h, i, r[base+i]
+    consume(regs ++ r[base ..])
+    emit HashNext h, top                -- next match for the same probe row
+    none:)
+
+gen(Aggregate(keys, aggs, child), consume)
+  emit AggOpen a
+  gen(child, regs -> emit AggStep a, keyRegs, valRegs)   -- loop 1: accumulate
+  emit AggRewind a, done                                  -- pipeline break
+  top:
+  for each output column i: emit AggColumn a, i, r[base+i]
+  consume(r[base ..])                                     -- loop 2: emit groups
+  emit AggNext a, top
+  done:
+</pre>
+
+  <p>Notice the difference between operators. Filter, Project, Limit, and the probe side of a hash
+    join just wrap their parent's code: they <em>pipeline</em>. The hash join's build side and the
+    aggregate are <em>pipeline breakers</em>. They finish one loop, materialize into an ephemeral
+    table, and start a new loop over that table. A compiled query is a sequence of pipelines, each
+    one a tight loop with no function calls inside it.</p>
+
+  <p>Pick a query below and click a node to see exactly which instructions it emitted. The Filter
+    is two instructions in the middle of the probe loop (its constant <code>1</code> is hoisted into the prologue). The HashJoin is spread across two
+    separate loops.</p>
+
+  <div id="viz-produce"></div>
+
+  <div class="aside"><p>Compare this with part 2's iterators. In the Volcano model the
+    <em>parent</em> pulls (<code>child.Next()</code>); here the <em>child</em> pushes into its parent's
+    code. Push-based pipelines are what HyPer, Umbra, and DuckDB use. DuckDB pushes vectors through
+    pipelines; HyPer compiles each pipeline to machine code. Our compiler emits bytecode instead,
+    which keeps it small enough to read and step through.</p></div>
+
+  <h2>Running it</h2>
+
+  <p>Here is the compiled program for a join with a filter and a <code>LIMIT</code>, running on the
+    toy dataset. <strong>Step 1</strong> executes one instruction. <strong>Run to next row</strong>
+    keeps going until <code>ResultRow</code> yields. <strong>step(fuel)</strong> calls the VM with a
+    budget: it returns <code>OutOfFuel</code> as soon as that many instructions have executed, even
+    in the middle of building the hash table.</p>
+
+  <p>Then try the important part. Take a <strong>Snapshot</strong> partway through, run on to the
+    end, then <strong>Restore into fresh VM</strong>. The restored VM is built from nothing but the
+    JSON you see. It continues exactly where the snapshot was taken and yields the same rows.</p>
+
+  <p>One guess before you start:</p>
+  <div id="predict-snap"></div>
+
+  <div id="viz-vm"></div>
+
+  <p>Things worth watching:</p>
+  <ul>
+    <li>Addresses 2–9 are the build loop: orders go into hash table 0 before a single customer is
+      read. Bo (<code>id = 2</code>) probes and misses, so <code>HashSeek</code> jumps straight to
+      <code>Next</code>.</li>
+    <li>The filter <code>o.qty &gt; 1</code> is <code>Gt</code> followed by <code>IfNot</code>. Ada's
+      second order (qty 1) fails it and jumps to <code>HashNext</code>.</li>
+    <li>After the second row, <code>DecrJumpZero</code> takes the counter in <code>r1</code> to zero
+      and jumps to <code>Halt</code>. Di is never read. In the iterator model, LIMIT just stops
+      calling <code>Next()</code>; here it's a jump.</li>
+    <li>In the <em>GROUP BY</em> program, the first loop (<code>AggStep</code>) only accumulates. No
+      row comes out until <code>AggRewind</code> starts the second loop.</li>
+  </ul>
+
+  <h2>Why "state is data" is the whole point</h2>
+
+  <p>Any executor can pause between rows. Part 2's iterators already do: <code>Next()</code>
+    returns one row, and the caller decides when to ask for the next. The question is what else you
+    can do with a paused query. That depends on where the state lives.</p>
+
+  <div class="two-col">
+    <div>
+      <h4>Tree of iterators, paused inside a hash-join build</h4>
+<pre>Limit.Next()
+  Project.Next()
+    Filter.Next()
+      HashJoin.Next()
+        buildTable()          ← here
+          Scan(orders).Next()
+
+state: 6 host stack frames, locals
+       in each, iterator objects
+       holding closures</pre>
+    </div>
+    <div>
+      <h4>VM, paused at the same moment</h4>
+<pre>{ "pc": 5,
+  "regs": {"1":2,"2":12,"3":1,"4":101,
+           "5":1,"14":1},
+  "cursors": {"0":{"table":"orders",
+                   "pos":2}},
+  "hashTables": {"0":{"buckets":{
+     "1":[[10,1,100,2],[11,1,101,1]]}}},
+  "halted": false }</pre>
+    </div>
+  </div>
+
+  <p>On the left, the query "is" six host stack frames. You can't pause it in the middle of
+    <code>buildTable()</code> without blocking a thread, and you can't move those frames to another
+    process. On the right, the query is a JSON value you could put in a database row.</p>
+
+  <div class="table-wrap"><table class="data compare">
+    <thead><tr><th></th><th>pause between rows</th><th>pause mid-operator</th><th>serialize &amp; resume elsewhere</th></tr></thead>
+    <tbody>
+      <tr><td>Materializing tree (sqlglot's executor)</td><td class="no">no</td><td class="no">no</td><td class="no">no</td></tr>
+      <tr><td>Volcano iterators (part 2)</td><td class="yes">yes</td><td class="no">no: a blocking build runs inside one <code>Next()</code></td><td class="meh">in principle; state is scattered across objects</td></tr>
+      <tr><td>Coroutines / Java virtual threads</td><td class="yes">yes</td><td class="yes">yes</td><td class="no">no: frames aren't data</td></tr>
+      <tr><td>Bytecode VM</td><td class="yes">yes</td><td class="yes">yes, after any instruction</td><td class="yes">yes: pc + registers + cursors + tables</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>Virtual threads deserve a closer look, because they're the obvious "just use the host"
+    answer on the JVM. A virtual thread can park anywhere, cheaply, and that covers suspension. But
+    the parked state is a chain of JVM stack frames. You can't write it to disk, send it to another
+    node, or inspect it to see how far along the query is. The VM's state can do all three.</p>
+
+  <h3>Fuel: budgets you can enforce from inside</h3>
+
+  <p>Because <code>step()</code> counts instructions, a budget is a number you pass in. A caller can
+    run a query in slices of 10,000 instructions and check a deadline, a cancellation flag, or
+    a memory high-water mark between slices. Cancellation is <em>cooperative by
+    construction</em>: the VM can't be stuck anywhere the check can't reach, because every
+    instruction is a check point.</p>
+
+  <p>The alternative is ugly, and you may have met it: an interpreter that can hang inside a single
+    host call, where the only lever is to interrupt the host thread from outside and then throw the
+    whole context away because you can't trust its state afterward. A fuel-driven VM never needs
+    that. Out of fuel is a normal return value, and the state it leaves behind is consistent.</p>
+
+  <h3>What makes a snapshot hard</h3>
+
+  <ul>
+    <li><strong>Cursors over mutable data.</strong> Our cursor is <code>(table, pos)</code> because
+      the toy tables never change. Over a real table, "position 2" means nothing after an insert. You
+      need a snapshot id (MVCC) or an immutable input, such as a CSV upload frozen at upload time.</li>
+    <li><strong>Large ephemeral state.</strong> A snapshot taken mid-build carries the half-built hash
+      table. That's fine for thousands of rows and expensive for millions. The answer is to snapshot
+      at pipeline boundaries when you can, or spill ephemeral tables to storage and snapshot only a
+      reference.</li>
+    <li><strong>The program must be identical.</strong> The snapshot refers to addresses and
+      register numbers, so restoring requires the same compiled program. Store the program, or a hash
+      of the plan and compiler version, next to the state.</li>
+  </ul>
+
+  <div class="sqlglot"><p>sqlglot's executor is roughly the opposite design. It turns each SQL
+    expression into a Python source string and <code>eval</code>s it, which is closure compilation
+    for expressions (part 1). But it runs the plan DAG step by step, and each step materializes a whole
+    <code>Table</code> before the next starts. So there's no yield point inside a query at all:
+    <code>execute()</code> returns when everything is done. Its planner steps (Scan, Join, Aggregate,
+    Sort, SetOperation) map almost one-to-one onto our pipelines, though. A compiler like the one
+    above could consume sqlglot's <code>Plan</code> directly.</p></div>
+
+  <h2>What it costs</h2>
+
+  <p>Nothing is free. The VM pays an interpretation tax: a <code>switch</code> dispatch for every
+    instruction, for every row. The join program above spends about a dozen instructions per joined
+    row, nearly all of them shuffling single values between registers. SQLite accepts that because
+    its bottleneck is usually I/O and its priority is size and portability.</p>
+
+  <p>Analytical engines answer it in one of two ways:</p>
+  <ul>
+    <li><strong>Vectorize</strong> (MonetDB/X100, DuckDB): every operation works on a batch of about
+      2,048 values, so one dispatch is spread over thousands of rows. A <code>Column</code> fills a
+      vector; <code>Gt</code> produces a selection vector; the loops inside each operation are tight
+      enough for the CPU (or the JVM's JIT) to optimize.</li>
+    <li><strong>Compile</strong> (HyPer, Umbra): generate machine code per pipeline, so there's no
+      dispatch at all. On the JVM this means generating JVM bytecode at runtime, which is what
+      Calcite does with Janino. It's fast, but it puts a code generator and class loader in your
+      query path.</li>
+  </ul>
+
+  <p>There's a middle ground that keeps everything this post is about: <strong>vector
+    registers</strong>. Keep the same design (pc, registers, cursors, ephemeral tables, fuel,
+    snapshot), but make each register hold a batch of values instead of one. <code>Column</code>
+    reads 1,024 values, <code>Gt</code> compares them all, <code>IfNot</code> becomes "filter the
+    selection vector", and <code>ResultRow</code> yields a batch. Dispatch cost is divided by the
+    batch size, and the state is still a JSON-able map of registers.</p>
+
+  <h2>The integrated engine</h2>
+
+  <p>Everything from the series is in <code>go/engine</code> and <code>clojure/src/engine</code>.
+    SQL text goes through a parser and binder into a logical plan. The part-6 planner reads
+    statistics and picks a join order and algorithms, producing a physical plan. That plan runs on
+    either executor: the iterator tree from parts 2–5, or this part's compiler and VM. The two must
+    agree on every query in <code>queries/golden.sql</code>, and the tests check that they do.</p>
+
+<pre><code>$ go run ./cmd/engine
+&gt; \program
+&gt; SELECT c.city, count(*) FROM customers c JOIN orders o ON o.customer_id = c.id GROUP BY c.city
+  ... the bytecode listing, then the rows ...
+&gt; \vm            -- toggle the executor
+&gt; \explain on    -- show the physical plan with estimates</code></pre>
+
+  <div class="code-ref"><p><code>go/lesson07/bytecode.go</code> · <code>clojure/src/lesson07/bytecode.clj</code>
+    (ns <code>lesson07.bytecode</code>): the compiler, the VM, and a demo that runs a query in small
+    fuel slices, snapshots mid-flight, restores into a new VM, and checks the results match. Run with
+    <code>go run ./cmd/lesson07</code> or <code>clojure -M -m lesson07.bytecode</code>. The full engine:
+    <code>go run ./cmd/engine -vm</code> or <code>clojure -M -m engine.main --vm</code>.</p></div>
+
+  <div class="build-it"><p>Write the machine and the compiler: the fetch/dispatch loop with fuel, <code>ResultRow</code>'s yield-and-resume, and the produce/consume code generation for a Filter and a nested-loop join. The exercise track for this part (<code>vm-step-loop</code>, <code>compile-filter</code>, <code>compile-nl-join</code>, plus <code>vm-cursor-ops</code> in Go and <code>vm-result-row</code> in Clojure)
+    strips those function bodies out of the lesson and leaves the tests. Fill them in until the tests pass:</p>
+<pre><code>cd go &amp;&amp; go test ./exercises/lesson07/
+cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson07.bytecode-test</code></pre>
+    <p>Hints and the full list are in <a href="../../EXERCISES.md">EXERCISES.md</a>.</p></div>
+
+  <div class="takeaway"><p>A query is resumable when its state is data rather than a call stack.
+    Compiling the plan into flat bytecode is one clean way to get there: the plan becomes loops and
+    jumps, pipeline breakers become ephemeral tables, <code>ResultRow</code> becomes a return, and
+    pc + registers + cursors + tables is everything you need to stop, save, budget, and resume.</p></div>
+
+  <h2>Further reading</h2>
+  <ul>
+    <li><strong>SQLite, "The SQLite Bytecode Engine"</strong> (sqlite.org/opcode.html), and running
+      <code>EXPLAIN</code> on your own queries in the <code>sqlite3</code> shell.</li>
+    <li><strong>Goetz Graefe, "Volcano: An Extensible and Parallel Query Evaluation System"</strong> (1994).
+      The pull-iterator model from part 2.</li>
+    <li><strong>Boncz, Zukowski, Nes, "MonetDB/X100: Hyper-Pipelining Query Execution"</strong> (CIDR 2005).
+      Vectorized execution.</li>
+    <li><strong>Thomas Neumann, "Efficiently Compiling Efficient Query Plans for Modern Hardware"</strong>
+      (VLDB 2011). Produce/consume and data-centric code generation.</li>
+    <li><strong>Kersten, Leis, Kemper, Neumann, Pavlo, Boncz, "Everything You Always Wanted to Know About
+      Compiled and Vectorized Queries But Were Afraid to Ask"</strong> (VLDB 2018). The two models head to head.</li>
+    <li><strong>Toby Mao, "Writing a Python SQL engine from scratch"</strong> (sqlglot
+      <code>posts/python_sql_engine.md</code>). Where this series started.</li>
+    <li><strong>Selinger et al., "Access Path Selection in a Relational Database Management System"</strong>
+      (SIGMOD 1979), and <strong>Leis et al., "How Good Are Query Optimizers, Really?"</strong> (VLDB 2015),
+      for parts 5–6.</li>
+  </ul>
+
+  <div data-series></div>
+</article>
+</body>
+</html>

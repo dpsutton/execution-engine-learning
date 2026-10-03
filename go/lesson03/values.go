@@ -1,0 +1,147 @@
+package lesson03
+
+// Copied (compact) from lessons 1–2 so this lesson stands alone: values, comparison, the Operator
+// interface, Scan, and Collect.
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
+
+type Value = any
+type Row = []Value
+
+func Format(v Value) string {
+	switch v := v.(type) {
+	case nil:
+		return "NULL"
+	case float64:
+		return fmt.Sprintf("%.2f", v)
+	}
+	return fmt.Sprint(v)
+}
+
+// Compare orders two non-NULL values: -1, 0, 1. ints and floats compare numerically.
+func Compare(a, b Value) int {
+	switch x := a.(type) {
+	case int64:
+		if y, ok := b.(int64); ok {
+			return cmp3(x < y, x > y)
+		}
+		return cmpFloat(float64(x), toFloat(b))
+	case float64:
+		return cmpFloat(x, toFloat(b))
+	case string:
+		y := b.(string)
+		return cmp3(x < y, x > y)
+	case bool:
+		y := b.(bool)
+		return cmp3(!x && y, x && !y)
+	}
+	panic(fmt.Sprintf("cannot compare %v and %v", a, b))
+}
+
+func toFloat(v Value) float64 {
+	if i, ok := v.(int64); ok {
+		return float64(i)
+	}
+	return v.(float64)
+}
+func cmpFloat(a, b float64) int { return cmp3(a < b, a > b) }
+func cmp3(less, greater bool) int {
+	if less {
+		return -1
+	}
+	if greater {
+		return 1
+	}
+	return 0
+}
+
+// KeysEqual is join-key equality: NULL never equals anything, not even NULL.
+func KeysEqual(a, b Value) bool { return a != nil && b != nil && Compare(a, b) == 0 }
+
+// hashKey turns a value into a Go map key. Numbers normalize to float so 1 and 1.0 land together.
+func hashKey(v Value) string {
+	switch v := v.(type) {
+	case int64:
+		return fmt.Sprintf("n:%v", float64(v))
+	case float64:
+		return fmt.Sprintf("n:%v", v)
+	}
+	return fmt.Sprintf("%T:%v", v, v)
+}
+
+type Operator interface {
+	Open()
+	Next() (Row, bool)
+	Close()
+	Schema() []string
+}
+
+type Scan struct {
+	T   *Table
+	pos int
+}
+
+func (s *Scan) Open()            { s.pos = 0 }
+func (s *Scan) Close()           {}
+func (s *Scan) Schema() []string { return s.T.Cols }
+func (s *Scan) Next() (Row, bool) {
+	if s.pos >= len(s.T.Rows) {
+		return nil, false
+	}
+	s.pos++
+	return s.T.Rows[s.pos-1], true
+}
+
+func Collect(op Operator) []Row {
+	op.Open()
+	defer op.Close()
+	var out []Row
+	for {
+		r, ok := op.Next()
+		if !ok {
+			return out
+		}
+		out = append(out, r)
+	}
+}
+
+// Sort is the simplest possible sort operator: read everything, sort, hand rows back.
+// NULLs sort last. (Lesson 4 is all about doing this better.)
+type Sort struct {
+	Child Operator
+	Key   int // column index to sort on, ascending
+	rows  []Row
+	pos   int
+}
+
+func (s *Sort) Schema() []string { return s.Child.Schema() }
+func (s *Sort) Close()           { s.rows = nil }
+func (s *Sort) Open() {
+	s.rows, s.pos = Collect(s.Child), 0
+	sort.SliceStable(s.rows, func(i, j int) bool {
+		a, b := s.rows[i][s.Key], s.rows[j][s.Key]
+		if a == nil || b == nil {
+			return a != nil && b == nil // non-NULL before NULL
+		}
+		return Compare(a, b) < 0
+	})
+}
+func (s *Sort) Next() (Row, bool) {
+	if s.pos >= len(s.rows) {
+		return nil, false
+	}
+	s.pos++
+	return s.rows[s.pos-1], true
+}
+
+func FormatRow(r Row) string {
+	parts := make([]string, len(r))
+	for i, v := range r {
+		parts[i] = Format(v)
+	}
+	return strings.Join(parts, " | ")
+}

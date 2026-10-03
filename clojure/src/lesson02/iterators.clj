@@ -1,0 +1,255 @@
+(ns lesson02.iterators
+  "Lesson 2 — operators as pull iterators (the Volcano model).
+
+  A query plan is a tree of operators. Every operator has the same tiny interface:
+
+      open!   allocate state, open children
+      next!   return the next row, or nil when exhausted
+      close!  release state, close children
+      schema  the names of the columns this operator produces
+
+  The root's consumer calls next!, which calls next! on its child, and so on down to a Scan that
+  reads one row from a table. One row travels up the tree per call, so nothing is materialized:
+  a Limit that has what it needs simply stops calling its child.
+
+  Operator state is mutable (volatiles) on purpose — it mirrors the Go lesson line for line, and it
+  is what a real engine does. At the end of this file there's a note on how this compares to a
+  lazy-seq pipeline, which is the obvious Clojure question."
+  (:require [clojure.string :as str]))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Expressions — a compact copy of lesson 1's compiler (lessons are standalone)
+
+(defn- compare-values [a b]
+  (if (and (number? a) (number? b))
+    (if (and (int? a) (int? b)) (compare (long a) (long b)) (compare (double a) (double b)))
+    (compare a b)))
+
+(defn- col-index [schema col-name]
+  (let [exact (keep-indexed (fn [i c] (when (= c col-name) i)) schema)
+        bare  (keep-indexed (fn [i c] (when (str/ends-with? c (str "." col-name)) i)) schema)]
+    (cond (seq exact) (first exact)
+          (= 1 (count bare)) (first bare)
+          :else (throw (ex-info (str "unknown or ambiguous column " col-name) {:schema schema})))))
+
+(defn compile-expr
+  "Compile an expression tree into (fn [row] value). See lesson 1 for the full story."
+  [expr schema]
+  (let [[tag a b] expr
+        sub #(compile-expr % schema)]
+    (case tag
+      :col (let [i (col-index schema a)] (fn [row] (nth row i)))
+      :lit (fn [_] a)
+      (:+ :- :*) (let [l (sub a) r (sub b) op ({:+ + :- - :* *} tag)]
+                   (fn [row] (let [x (l row) y (r row)]
+                               (when (and (some? x) (some? y))
+                                 (if (and (int? x) (int? y)) (op x y) (op (double x) (double y)))))))
+      :/ (let [l (sub a) r (sub b)]
+           (fn [row] (let [x (l row) y (r row)]
+                       (when (and (some? x) (some? y) (not (zero? (double y)))) (/ (double x) (double y))))))
+      (:= :!= :< :<= :> :>=)
+      (let [l (sub a) r (sub b)
+            test ({:= zero? :!= (complement zero?) :< neg? :<= (complement pos?) :> pos? :>= (complement neg?)} tag)]
+        (fn [row] (let [x (l row) y (r row)]
+                    (when (and (some? x) (some? y)) (test (compare-values x y))))))
+      :and (let [l (sub a) r (sub b)]
+             (fn [row] (let [x (l row)]
+                         (if (false? x) false
+                             (let [y (r row)] (cond (false? y) false (or (nil? x) (nil? y)) nil :else true))))))
+      :or (let [l (sub a) r (sub b)]
+            (fn [row] (let [x (l row)]
+                        (if (true? x) true
+                            (let [y (r row)] (cond (true? y) true (or (nil? x) (nil? y)) nil :else false))))))
+      :not (let [e (sub a)] (fn [row] (let [x (e row)] (when (some? x) (not x)))))
+      :is-null (let [e (sub a)] (fn [row] (nil? (e row))))
+      :is-not-null (let [e (sub a)] (fn [row] (some? (e row))))
+      :fn (let [args (mapv sub (drop 2 expr))
+                f    ({"lower" str/lower-case "upper" str/upper-case "length" (comp long count)} a)]
+            (fn [row] (let [v ((first args) row)] (when (some? v) (f v))))))))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; The interface
+
+(defprotocol Operator
+  (open! [op] "Prepare to produce rows; opens children.")
+  (next! [op] "The next row as a vector, or nil when exhausted.")
+  (close! [op] "Release state; closes children.")
+  (schema [op] "Vector of output column names."))
+
+(defn run
+  "Drive an operator tree to completion: open, pull until nil, close. Returns all rows."
+  [op]
+  (open! op)
+  (try
+    (loop [acc []]
+      (if-let [row (next! op)] (recur (conj acc row)) acc))
+    (finally (close! op))))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Operators
+
+(defn scan
+  "Read a table's rows in order. `table` is {:columns [...] :rows [...]}; output columns are
+  qualified with `alias` (the table name by default)."
+  ([table-name table] (scan table-name table table-name))
+  ([_table-name {:keys [columns rows]} alias]
+   (let [pos (volatile! 0)]
+     (reify Operator
+       (open! [_] (vreset! pos 0))
+       (next! [_] (when (< @pos (count rows))
+                    (let [row (nth rows @pos)] (vswap! pos inc) row)))
+       (close! [_] nil)
+       (schema [_] (mapv #(str alias "." %) columns))))))
+
+(defn filter-op
+  "Pass through only rows where `pred` is exactly true (NULL counts as false)."
+  [child pred]
+  (let [p (compile-expr pred (schema child))]
+    (reify Operator
+      (open! [_] (open! child))
+      (next! [_]
+        ;; EXERCISE(filter-next): Pull rows from the child until one makes the predicate exactly true
+        ;; and return it; return nil when the child runs out.
+        (loop []
+          (when-let [row (next! child)]
+            (if (true? (p row)) row (recur))))
+        ;; END EXERCISE
+        )
+      (close! [_] (close! child))
+      (schema [_] (schema child)))))
+
+(defn project
+  "Compute new columns. `items` is a vector of [expr name]."
+  [child items]
+  (let [fs (mapv (fn [[e _]] (compile-expr e (schema child))) items)]
+    (reify Operator
+      (open! [_] (open! child))
+      (next! [_] (when-let [row (next! child)] (mapv #(% row) fs)))
+      (close! [_] (close! child))
+      (schema [_] (mapv second items)))))
+
+(defn limit
+  "Return at most `n` rows — and after that, stop asking the child for more."
+  [child n]
+  (let [seen (volatile! 0)]
+    (reify Operator
+      (open! [_] (vreset! seen 0) (open! child))
+      (next! [_]
+        ;; EXERCISE(limit-next): Pass child rows through until n have been returned; after that,
+        ;; return nil WITHOUT asking the child for another row.
+        (when (< @seen n)
+          (when-let [row (next! child)] (vswap! seen inc) row))
+        ;; END EXERCISE
+        )
+      (close! [_] (close! child))
+      (schema [_] (schema child)))))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Tracing: wrap every operator so each call prints, indented by depth
+
+(def ^:private depth (volatile! 0))
+
+(defn traced
+  "Wrap `op` so every next! call prints `label.next()` on the way down and the row on the way up."
+  [label op]
+  (reify Operator
+    (open! [_] (open! op))
+    (next! [_]
+      (let [pad (apply str (repeat @depth "  "))]
+        (println (str pad "→ " label ".next()"))
+        (vswap! depth inc)
+        (let [row (try (next! op) (finally (vswap! depth dec)))]
+          (println (str pad "← " label " " (if row (pr-str row) "nil (done)")))
+          row)))
+    (close! [_] (close! op))
+    (schema [_] (schema op))))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Toy data
+
+(def customers
+  {:columns ["id" "name" "city" "age"]
+   :rows    [[1 "Ada" "Austin" 36]
+             [2 "Bo" "Boston" nil]
+             [3 "Cy" "Austin" 52]
+             [4 "Di" "Denver" 29]]})
+
+(defn- format-value [v] (cond (nil? v) "NULL" (double? v) (format "%.2f" v) :else (str v)))
+
+(defn print-table [columns rows]
+  (let [cells  (cons (vec columns) (map #(mapv format-value %) rows))
+        widths (apply map (fn [& col] (apply max (map count col))) cells)
+        line   (fn [r] (str/join " | " (map (fn [w c] (format (str "%-" w "s") c)) widths r)))]
+    (println (line (first cells)))
+    (println (str/join "-+-" (map #(apply str (repeat % "-")) widths)))
+    (doseq [r (rest cells)] (println (line r)))))
+
+(defn- header [s] (println) (println (str "== " s " " (apply str (repeat (max 0 (- 70 (count s))) "=")))))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Demo
+
+(defn -main [& _]
+  (header "A plan is a tree of operators")
+  (println "SELECT name, age FROM customers WHERE age > 30 LIMIT 1")
+  (println)
+  (println "  Limit 1")
+  (println "    Project name, age")
+  (println "      Filter age > 30")
+  (println "        Scan customers")
+
+  (let [plan (-> (scan "customers" customers)
+                 (filter-op [:> [:col "age"] [:lit 30]])
+                 (project [[[:col "name"] "name"] [[:col "age"] "age"]])
+                 (limit 1))]
+    (println)
+    (print-table (schema plan) (run plan)))
+
+  (header "Tracing the calls")
+  (println "Each next() travels down to Scan; one row travels back up.")
+  (println)
+  (let [scanned (atom 0)
+        counting (fn [op] (reify Operator
+                            (open! [_] (open! op))
+                            (next! [_] (let [r (next! op)] (when r (swap! scanned inc)) r))
+                            (close! [_] (close! op))
+                            (schema [_] (schema op))))
+        plan (->> (scan "customers" customers) counting (traced "Scan")
+                  (#(filter-op % [:> [:col "age"] [:lit 30]])) (traced "Filter")
+                  (#(project % [[[:col "name"] "name"]])) (traced "Project")
+                  (#(limit % 2)) (traced "Limit"))]
+    (println "Same plan with LIMIT 2.")
+    (open! plan)
+    (doseq [i [1 2 3]]
+      (println (str "-- consumer asks for row " i))
+      (next! plan))
+    (close! plan)
+    (println)
+    (println (format "Scan produced %d of %d rows. Bo was read and dropped by Filter (age is NULL);"
+                     @scanned (count (:rows customers))))
+    (println "the third call stopped at Limit, so Di was never read at all:")
+    (println "rows that are never needed are never read."))
+
+  (header "Compare: a lazy-seq pipeline")
+  (println "Clojure's (->> rows (filter p) (map f) (take n)) is also a pull pipeline: take asks map,")
+  (println "map asks filter. The difference is the unit of work. Lazy seqs over vectors and ranges")
+  (println "are *chunked*: each pull realizes 32 elements at once.")
+  (let [realized (atom 0)
+        result   (->> (range 1000)
+                      (map (fn [i] (swap! realized inc) i))
+                      (filter even?)
+                      (take 2)
+                      doall)]
+    (println (format "  (take 2) of a mapped range → %s, but %d elements were realized." (pr-str result) @realized)))
+  (let [realized (atom 0)
+        rows     (mapv (fn [i] [i]) (range 1000))
+        plan     (limit (filter-op (reify Operator
+                                     (open! [_] nil)
+                                     (next! [_] (when (< @realized 1000) (let [r (rows @realized)] (swap! realized inc) r)))
+                                     (close! [_] nil)
+                                     (schema [_] ["t.i"]))
+                                   [:= [:lit 0] [:lit 0]])
+                        2)]
+    (println (format "  Limit 2 over an iterator → %s, and %d rows were read." (pr-str (run plan)) @realized)))
+  (println "Engines want explicit control of that granularity: one row (Volcano), a batch of ~1000")
+  (println "(vectorized, lesson 7's aside), or a whole pipeline compiled into a loop (lesson 7)."))

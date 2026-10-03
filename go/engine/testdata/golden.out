@@ -1,0 +1,147 @@
+SELECT id, name, city, age FROM customers WHERE id <= 5 ORDER BY id
+id | name | city | age
+1 | cust1 | Austin | 44
+2 | cust2 | Austin | 21
+3 | cust3 | Miami | 47
+4 | cust4 | Austin | 44
+5 | cust5 | Austin | 22
+(5 rows)
+
+SELECT city, count(*) AS n FROM customers GROUP BY city ORDER BY n DESC, city
+city | n
+Austin | 78
+Boston | 45
+Oakland | 16
+Denver | 15
+Chicago | 14
+Miami | 14
+Seattle | 10
+Portland | 8
+(8 rows)
+
+SELECT count(*), count(age), min(age), max(age), avg(age) FROM customers
+count(*) | count(age) | min(age) | max(age) | avg(age)
+200 | 189 | 18 | 76 | 46.26
+(1 rows)
+
+SELECT name FROM customers WHERE age IS NULL ORDER BY name LIMIT 5
+name
+cust102
+cust119
+cust136
+cust153
+cust17
+(5 rows)
+
+SELECT category, count(*) AS n, avg(price) AS avg_price FROM products GROUP BY category ORDER BY category
+category | n | avg_price
+books | 9 | 42.27
+games | 4 | 69.54
+garden | 9 | 41.83
+music | 15 | 40.68
+tools | 13 | 46.92
+(5 rows)
+
+SELECT c.name, count(*) AS orders FROM customers c JOIN orders o ON o.customer_id = c.id GROUP BY c.name ORDER BY orders DESC, c.name LIMIT 10
+name | orders
+cust8 | 157
+cust11 | 154
+cust5 | 153
+cust3 | 150
+cust6 | 146
+cust4 | 143
+cust9 | 143
+cust10 | 141
+cust14 | 136
+cust17 | 132
+(10 rows)
+
+SELECT c.city, sum(o.qty * p.price) AS revenue FROM customers c JOIN orders o ON o.customer_id = c.id JOIN products p ON p.id = o.product_id GROUP BY c.city ORDER BY revenue DESC
+city | revenue
+Austin | 272935.68
+Boston | 136565.27
+Seattle | 83244.37
+Oakland | 58420.91
+Chicago | 46653.74
+Miami | 38731.82
+Denver | 22193.41
+Portland | 15175.68
+(8 rows)
+
+SELECT p.name, sum(o.qty) AS units FROM orders o, products p WHERE o.product_id = p.id AND p.category = 'games' GROUP BY p.name ORDER BY units DESC, p.name LIMIT 5
+name | units
+prod15 | 354
+prod16 | 303
+prod8 | 287
+prod3 | 246
+(4 rows)
+
+SELECT o.id, o.qty, o.day FROM orders o WHERE o.customer_id = 7 AND o.day > 300 ORDER BY o.day, o.id
+id | qty | day
+4281 | 1 | 305
+1322 | 4 | 307
+3699 | 5 | 312
+4753 | 1 | 313
+4311 | 4 | 318
+4261 | 5 | 324
+4799 | 5 | 326
+4985 | 3 | 333
+4048 | 2 | 334
+4123 | 4 | 335
+2648 | 3 | 336
+393 | 3 | 337
+4400 | 2 | 338
+1095 | 5 | 348
+3757 | 3 | 351
+4729 | 5 | 355
+1053 | 5 | 362
+2033 | 1 | 362
+3927 | 2 | 363
+1179 | 1 | 364
+3337 | 1 | 364
+(21 rows)
+
+SELECT c.name, o.day FROM customers c JOIN orders o ON o.customer_id = c.id WHERE c.city = 'Seattle' AND o.qty = 5 ORDER BY o.day DESC, c.name LIMIT 8
+name | day
+cust7 | 362
+cust18 | 357
+cust180 | 355
+cust7 | 355
+cust13 | 350
+cust18 | 348
+cust7 | 348
+cust8 | 345
+(8 rows)
+
+SELECT upper(city) AS city, count(*) AS n FROM customers WHERE age > 60 OR age IS NULL GROUP BY city HAVING count(*) > 2 ORDER BY n DESC, city
+city | n
+AUSTIN | 19
+BOSTON | 12
+CHICAGO | 9
+MIAMI | 7
+DENVER | 4
+PORTLAND | 4
+(6 rows)
+
+SELECT o.day, count(*) AS n, sum(o.qty) AS units FROM orders o WHERE o.day <= 3 GROUP BY o.day ORDER BY o.day
+day | n | units
+1 | 14 | 42
+2 | 17 | 48
+3 | 9 | 24
+(3 rows)
+
+SELECT p.category, c.city, count(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id JOIN products p ON p.id = o.product_id WHERE c.age < 30 GROUP BY p.category, c.city ORDER BY n DESC, p.category, c.city LIMIT 6
+category | city | n
+music | Austin | 166
+tools | Austin | 136
+music | Seattle | 115
+garden | Austin | 113
+music | Boston | 111
+tools | Seattle | 110
+(6 rows)
+
+SELECT id, price, price * 2 / 4 AS half, coalesce(NULL, name) AS nm FROM products WHERE price > 95 ORDER BY price DESC
+id | price | half | nm
+41 | 99.11 | 49.55 | prod41
+16 | 98.42 | 49.21 | prod16
+(2 rows)

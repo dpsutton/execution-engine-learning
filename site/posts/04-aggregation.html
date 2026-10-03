@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Part 4 · Aggregation &amp; sorting — Execution Engine</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/common.js"></script>
+<script src="../assets/viz/04-aggregation.js" defer></script>
+<style>
+  .ag-grid { display: grid; grid-template-columns: auto minmax(11rem, 14rem) auto; gap: 1.4rem; align-items: start; justify-content: start; }
+  @media (max-width: 760px) { .ag-grid { grid-template-columns: 1fr; } }
+  .ag-label { font: 600 .7rem/1 var(--sans); text-transform: uppercase; letter-spacing: .08em; color: var(--ink-faint); margin: .9rem 0 .4rem; }
+  .ag-grid .ag-label { margin-top: 0; }
+  .ag-groups { display: flex; flex-direction: column; gap: .45rem; }
+  .ag-card { border: 1.5px solid var(--rule); border-radius: 8px; padding: .45rem .65rem; background: var(--bg); transition: border-color .15s, background .15s; }
+  .ag-card.on { border-color: var(--accent); background: var(--accent-soft); }
+  .ag-key { font-size: .8rem; color: var(--ink-soft); margin-bottom: .2rem; }
+  .ag-key b { font-family: var(--mono); color: var(--ink); }
+  .ag-st { display: flex; justify-content: space-between; gap: 1rem; font-size: .78rem; color: var(--ink-soft); }
+  .ag-st b { color: var(--violet); }
+  .es-row { display: grid; grid-template-columns: minmax(12rem, auto) 1fr; gap: 1.5rem; align-items: start; }
+  @media (max-width: 640px) { .es-row { grid-template-columns: 1fr; } }
+  .es-cells { display: flex; flex-wrap: wrap; gap: 3px; }
+  .es-c { font: .75rem/1 var(--mono); min-width: 1.9rem; text-align: center; padding: .38rem .2rem; border-radius: 4px; border: 1px solid var(--rule); background: var(--bg); }
+  .es-c.wide { min-width: 3.1rem; }
+  .es-c.gone { opacity: .3; }
+  .es-c.mem { background: var(--violet-soft); border-color: var(--violet); color: var(--violet); }
+  .es-c.mem.sorted { background: var(--teal-soft); border-color: var(--teal); color: var(--teal); }
+  .es-c.mem.top { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .es-c.empty { border-style: dashed; }
+  .es-c.head { background: var(--accent-soft); border-color: var(--accent); font-weight: 600; }
+  .es-c.new { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .es-c.drop { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+  .es-c.outv { background: var(--good-soft); border-color: var(--good); color: var(--good); }
+  .es-run { display: flex; align-items: center; gap: .6rem; margin-bottom: .35rem; }
+  .es-rl { font: .72rem/1 var(--sans); color: var(--ink-faint); width: 2.6rem; flex: none; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Execution Engine</a>
+  <span>Part 4 of 7</span>
+  <span class="spacer"></span>
+  <button class="theme-toggle" type="button">◐ auto</button>
+</header>
+
+<article>
+  <div class="kicker">Part 4 · Aggregation &amp; sorting</div>
+  <h1>Grouping, sorting, and running out of memory</h1>
+  <p class="dek"><code>GROUP BY</code> and <code>ORDER BY</code> are the operators that have to see
+    everything before they can say anything. This post covers how they work, how to make them stream
+    where possible, what to do when the data doesn't fit in memory, and the cheap trick that makes
+    <code>ORDER BY … LIMIT 10</code> fast.</p>
+
+  <div data-warmup></div>
+
+  <p>Joins (part 3) bring matching rows from two inputs together. <code>GROUP BY</code> does the same thing
+    within <em>one</em> input: bring together all the rows with the same key, then boil each bunch down
+    to one row. Not surprisingly, the two standard ways to do that are the same two ideas as before:
+    <strong>hash</strong> the key, or <strong>sort</strong> by it.</p>
+
+  <h2>Aggregate functions are little state machines</h2>
+
+  <p>Before grouping anything, look at what an aggregate function actually needs. You can't compute
+    <code>avg(qty)</code> by holding all the quantities and averaging at the end, at least not if a group
+    has a billion rows. Instead, every aggregate is three operations over a small piece of
+    <strong>state</strong>:</p>
+
+<pre class="pseudo">interface Aggregate
+  init()             -> state
+  step(state, value) -> state      -- fold in one input value
+  final(state)       -> value      -- produce the answer
+
+count(*):  init 0         step: s + 1                          final: s
+count(x):  init 0         step: if x is null then s else s + 1 final: s
+sum(x):    init null      step: if x is null then s else (s ?? 0) + x   final: s
+min(x):    init null      step: if x is null then s else min(s ?? x, x) final: s
+avg(x):    init (0, 0)    step: if x is null then s else (s.sum + x, s.n + 1)
+                          final: if s.n == 0 then null else s.sum / s.n
+</pre>
+
+  <p>A few details that matter:</p>
+  <ul>
+    <li><code>avg</code>'s state isn't the average. It's the pair <em>(sum, count)</em>, and the
+      division happens only in <code>final</code>. A running average can't absorb a new value
+      without the count anyway, and keeping the pair is what makes partial aggregates mergeable. Two
+      threads, or two machines, can each aggregate half the data, then add their pairs
+      together.</li>
+    <li>Aggregates skip NULLs, except <code>count(*)</code>, which counts rows rather than values.
+      <code>sum</code> over zero non-NULL values is NULL, not 0 (SQL's choice, and a frequent surprise),
+      while <code>count</code> is 0.</li>
+    <li>With no <code>GROUP BY</code> at all, the whole input is one group, and that group exists even
+      when the input is empty: <code>SELECT count(*) FROM empty_table</code> returns one row,
+      <code>0</code>. Our aggregate operator handles that case explicitly.</li>
+  </ul>
+
+  <h2>Hash aggregation</h2>
+
+  <p>Hash aggregation keeps a hash table from group key to aggregate state. For each input row, it finds
+    (or creates) the row's group and steps every aggregate:</p>
+
+<pre class="pseudo">struct HashAggregate { child, keys, aggs, groups, order, pos }
+  method Open()
+    child.Open()
+    groups = new HashMap(key -> states); order = []
+    loop                                       -- drain the child: pipeline breaker
+      (row, ok) = child.Next()
+      if not ok then break
+      k = [e(row) for e in keys]               -- NULL keys group together
+      if k not in groups then
+        groups[k] = [a.init() for a in aggs]
+        append(order, k)                       -- remember first-seen order
+      groups[k] = [a.step(s, a.arg(row)) for (a, s) in zip(aggs, groups[k])]
+    if len(keys) == 0 and len(order) == 0 then  -- global aggregate, empty input
+      groups[[]] = [a.init() for a in aggs]; append(order, [])
+    pos = 0
+  method Next()
+    if pos >= len(order) then return (nil, false)
+    k = order[pos]; pos = pos + 1
+    return (k ++ [a.final(s) for (a, s) in zip(aggs, groups[k])], true)
+</pre>
+
+  <p>Note the line <em>NULL keys group together</em>. In a join, NULL never equals NULL, so NULL keys
+    never match. In <code>GROUP BY</code>, all the NULLs form one group. SQL is inconsistent here on
+    purpose, and the hash table has to follow suit: the join's build side skips NULL keys while the
+    aggregate treats NULL as an ordinary key.</p>
+
+  <p>Step through it, then switch to sort aggregation:</p>
+
+  <div id="viz-agg"></div>
+
+  <p>Hash aggregation reads its input once in any order, and its memory is proportional to the number of
+    <em>groups</em>, not the number of rows. Grouping a billion orders by country holds about two hundred
+    accumulators. Grouping them by order id holds a billion. That's the case where it hurts.</p>
+
+  <h2>Sort aggregation</h2>
+
+  <p>If the input arrives <em>sorted by the group key</em>, every group's rows are adjacent, and
+    grouping needs no hash table at all. Keep one group's state; when the key changes, that group is
+    finished forever, so emit it and start the next one:</p>
+
+<pre class="pseudo">struct SortAggregate { child, keys, aggs, cur, states, pending }
+  method Next()
+    loop
+      (row, ok) = child.Next()
+      if not ok then
+        if cur is null then return (nil, false)
+        out = cur ++ finals(states); cur = null
+        return (out, true)                     -- the last group
+      k = [e(row) for e in keys]
+      if cur is not null and k != cur then
+        out = cur ++ finals(states)            -- group boundary: emit the finished group
+        cur = k; states = inits(); step(states, row)
+        return (out, true)
+      if cur is null then cur = k; states = inits()
+      step(states, row)
+</pre>
+
+  <p>This is a streaming operator, not a pipeline breaker: it emits each group as soon as the group ends,
+    holds one group's state, and a <code>LIMIT</code> above it stops it early. The catch is the
+    precondition. If the input isn't already sorted, you have to sort it first, and sorting <em>is</em> a
+    pipeline breaker. So sort aggregation shines when the order is free: rows coming out of an index on
+    the group key, out of a merge join on the same key, or out of a sort the query needed anyway.</p>
+
+  <h2>Sorting</h2>
+
+  <p><code>ORDER BY</code> in memory is the <code>Sort</code> operator from part 2: drain the child into
+    a buffer, sort it, hand out rows. The interesting part is the comparator, which has to implement SQL
+    ordering exactly:</p>
+
+<pre class="pseudo">function compareRows(a, b, keys)              -- keys: [(expr, desc)]
+  for (e, desc) in keys
+    x = e(a); y = e(b)
+    if x is null and y is null then continue
+    if x is null then return +1                -- NULLs last, ASC and DESC alike
+    if y is null then return -1
+    c = compareValues(x, y)
+    if c != 0 then return if desc then -c else c
+  return 0                                     -- ties keep input order (stable sort)
+</pre>
+
+  <p>NULL placement is a per-engine convention: Postgres puts NULLs last in ascending order and first in
+    descending, and offers <code>NULLS FIRST</code>/<code>LAST</code> to override. We chose "always last"
+    for simplicity. The sort is <strong>stable</strong>, so rows that compare equal keep their input
+    order. That's not required by SQL, but it makes results reproducible, which our tests rely on.</p>
+
+  <h2>When it doesn't fit: external merge sort</h2>
+
+  <p>Sorting a hundred gigabytes with ten gigabytes of memory is old, solved, and elegant. It happens in
+    two phases:</p>
+  <ol>
+    <li><strong>Run generation.</strong> Read as many rows as fit in memory, sort them, write them to a
+      temporary file as a <em>run</em>. Repeat until the input is exhausted. Ten passes of 10 GB gives ten
+      sorted runs.</li>
+    <li><strong>Merge.</strong> Open every run and read them in parallel, keeping just the current head
+      of each in a min-heap. Repeatedly pop the smallest head, output it, and refill from that head's
+      run. This is the merge step of merge sort, but <em>k</em>-way.</li>
+  </ol>
+
+  <div id="viz-extsort"></div>
+
+  <p>Two numbers make this practical. First, every row is read and written exactly twice, once per
+    phase, no matter how big the data is relative to memory, as long as the runs can all be merged at
+    once. Second, merging <em>k</em> runs needs only one buffer per run. With 10 GB of memory and 1 MB
+    buffers you can merge 10,000 runs in one pass, so one merge pass covers about 10 GB × 10,000 = 100 TB.
+    Real external sorts almost never need a second merge pass. (In the figure, memory is tiny, so with
+    small <em>M</em> the note tells you how many passes a real implementation would need.)</p>
+
+<pre class="pseudo">function externalSort(input, M)
+  runs = []
+  loop                                          -- phase 1
+    chunk = take(input, M)
+    if empty(chunk) then break
+    append(runs, writeTemp(sort(chunk)))
+  heap = minHeap([(first(r), r) for r in runs]) -- phase 2
+  while not empty(heap)
+    (v, r) = pop(heap)
+    emit(v)
+    if hasNext(r) then push(heap, (next(r), r))
+</pre>
+
+  <p>The same idea rescues the other pipeline breakers. A hash aggregate or hash join whose table won't
+    fit <em>partitions</em> its input to disk by hash of the key, so each partition fits, then processes
+    one partition at a time. It's the hashing version of "sort the pieces, then merge."</p>
+
+  <div class="aside"><p>The lesson code's <code>ExternalSort</code> simulates spilling: it "writes" runs
+    to in-memory slices and counts the would-be I/O. That's enough to see the algorithm work, and it
+    leaves out file handling, which isn't what this series is about.</p></div>
+
+  <h2>Top-N: ORDER BY … LIMIT</h2>
+
+  <p>"The ten most expensive products" is <code>ORDER BY price DESC LIMIT 10</code>. A literal
+    execution sorts every row and then throws away all but ten. A smarter one notices that it only ever
+    needs to know the ten best rows <em>so far</em>, and keeps them in a heap:</p>
+
+<pre class="pseudo">struct TopN { child, n, keys, heap }           -- heap root = worst of the current best n
+  method Open()
+    loop
+      (row, ok) = child.Next()
+      if not ok then break
+      if len(heap) &lt; n then push(heap, row)
+      elif better(row, root(heap)) then replaceRoot(heap, row)   -- evict the worst
+      -- else: can't make the top n; one comparison and it's gone
+    result = sortDescending(heap)
+</pre>
+
+  <div id="viz-topn"></div>
+
+  <p>The win comes on both axes. Memory drops from <em>all rows</em> to <em>n rows</em>. Time drops from
+    <em>N</em> log <em>N</em> to <em>N</em> log <em>n</em>, and in practice it's lower still: once the heap
+    holds good values, most incoming rows lose to the root after a single comparison. For
+    <code>LIMIT 10</code> over a billion rows, that's the difference between an external sort spilling
+    gigabytes to disk and a ten-element array in cache. Postgres does exactly this ("top-N heapsort" in
+    <code>EXPLAIN ANALYZE</code>). Recognizing <code>Sort</code> under <code>Limit</code> and fusing them
+    into a <code>TopN</code> is a classic planner rewrite.</p>
+
+  <h2>HAVING, and the shape of a plan</h2>
+
+  <p><code>HAVING</code> needs no new machinery. It's a <code>Filter</code> placed <em>above</em> the
+    aggregate, evaluated on the aggregated rows. <code>WHERE</code> filters rows before grouping;
+    <code>HAVING</code> filters groups after. A complete single-table query now looks like this:</p>
+
+<pre class="pseudo">Limit(10)
+  Sort(revenue DESC)                     -- or TopN(10, revenue DESC)
+    Project(city, revenue)
+      Filter(count(*) > 2)               -- HAVING
+        HashAggregate(keys: city; aggs: count(*), sum(qty * price))
+          Filter(age &lt; 30)               -- WHERE
+            Scan(customers)
+</pre>
+
+  <p>Count the pipelines. Scan → Filter → (aggregate's input) is one: rows stream from the table into the
+    hash table. Then the aggregate's output → Filter → Project → (sort's input) is a second, and the
+    sort's output → Limit is a third. Every pipeline breaker ends one pipeline and starts another. That
+    picture, pipelines joined at breakers, is exactly the structure part 7's compiler will produce.</p>
+
+  <div class="sqlglot"><p>sqlglot's executor groups by <em>sorting</em>. Its aggregate step sorts the
+    whole input table by the group-by expressions, then walks it, tracking where each group starts and
+    ends. When the key changes, it evaluates the aggregates over that range of rows using a
+    <code>RangeReader</code>, which makes a column reference produce all of the group's values at once,
+    so <code>SUM</code> is just Python's <code>sum</code> over a generator. That's sort aggregation with
+    no incremental state machines, because the whole group is in memory anyway. Its sort step is
+    Python's built-in sort followed by slicing off the limit; there's no top-N heap and no spilling.</p></div>
+
+  <div class="code-ref"><p><code>go/lesson04/aggregation.go</code> ·
+    <code>clojure/src/lesson04/aggregation.clj</code> (ns <code>lesson04.aggregation</code>).
+    HashAggregate, SortAggregate, Sort, ExternalSort (simulated runs + k-way heap merge), and TopN, with a
+    demo that groups and sorts the toy orders every way: <code>go run ./cmd/lesson04</code> /
+    <code>clojure -M -m lesson04.aggregation</code>.</p></div>
+
+  <div class="build-it"><p>The exercise track for this part has the reference lesson with the
+    interesting function bodies replaced by TODOs, and tests that fail until you fill them in. For this
+    part: <code>hash-aggregate</code>, <code>external-sort-merge</code>, <code>top-n</code> (see <a href="../../EXERCISES.md">EXERCISES.md</a> for the current list and hints).</p>
+    <p><code>cd go &amp;&amp; go test ./exercises/lesson04/</code><br>
+    <code>cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson04.aggregation-test</code></p></div>
+
+  <div class="takeaway"><p>Aggregates are init/step/final over small, mergeable state. Group by hashing
+    (any order in, memory per group) or by sorting (sorted input in, one group in memory, streams out).
+    When data outgrows memory, sort runs and merge them; when only the top <em>n</em> matter, keep a heap of
+    <em>n</em>. Pipeline breakers split a plan into pipelines.</p></div>
+
+  <div data-series></div>
+</article>
+</body>
+</html>

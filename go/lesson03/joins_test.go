@@ -1,0 +1,81 @@
+package lesson03
+
+import (
+	"sort"
+	"testing"
+)
+
+func eqPred(l, r int) func(Row) bool {
+	return func(row Row) bool { return KeysEqual(row[l], row[r]) }
+}
+
+func sortedStrings(rows []Row) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = FormatRow(r)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// customers ⋈ orders on customers.id = orders.customer_id, three ways.
+func threeWays(c, o *Table) (nl, hash, merge []Row) {
+	nl = Collect(&NLJoin{Left: &Scan{T: c}, Right: &Scan{T: o}, Pred: eqPred(0, 5)})
+	hash = Collect(&HashJoin{Left: &Scan{T: c}, Right: &Scan{T: o}, LeftKey: 0, RightKey: 1})
+	merge = Collect(&MergeJoin{
+		Left:  &Sort{Child: &Scan{T: c}, Key: 0},
+		Right: &Sort{Child: &Scan{T: o}, Key: 1}, LeftKey: 0, RightKey: 1})
+	return
+}
+
+func TestJoinsAgree(t *testing.T) {
+	gc, _, gorders := Generate()
+	for _, tables := range [][2]*Table{{ToyCustomers, ToyOrders}, {gc, gorders}} {
+		nl, hash, merge := threeWays(tables[0], tables[1])
+		a, b, c := sortedStrings(nl), sortedStrings(hash), sortedStrings(merge)
+		if len(a) != len(b) || len(a) != len(c) {
+			t.Fatalf("row counts differ: nl=%d hash=%d merge=%d", len(a), len(b), len(c))
+		}
+		for i := range a {
+			if a[i] != b[i] || a[i] != c[i] {
+				t.Fatalf("row %d differs:\n nl=%s\n hash=%s\n merge=%s", i, a[i], b[i], c[i])
+			}
+		}
+	}
+}
+
+func TestToyInnerJoin(t *testing.T) {
+	_, hash, _ := threeWays(ToyCustomers, ToyOrders)
+	if len(hash) != 4 { // Ada×2, Cy, Di; Bo has none, order 14's customer doesn't exist
+		t.Fatalf("got %d rows", len(hash))
+	}
+}
+
+func TestLeftOuter(t *testing.T) {
+	// customers LEFT JOIN orders: Bo appears once, padded with NULLs.
+	rows := Collect(&HashJoin{Left: &Scan{T: ToyCustomers}, Right: &Scan{T: ToyOrders}, LeftKey: 0, RightKey: 1, Kind: LeftOuter})
+	nlRows := Collect(&NLJoin{Left: &Scan{T: ToyCustomers}, Right: &Scan{T: ToyOrders}, Pred: eqPred(0, 5), Kind: LeftOuter})
+	if len(rows) != 5 || len(nlRows) != 5 {
+		t.Fatalf("hash=%d nl=%d, want 5", len(rows), len(nlRows))
+	}
+	for _, r := range rows {
+		if r[1] == "Bo" && r[4] != nil {
+			t.Fatalf("Bo should be padded with NULLs: %v", r)
+		}
+	}
+	// orders LEFT JOIN customers: the orphan order 14 survives with NULL customer columns.
+	rows = Collect(&HashJoin{Left: &Scan{T: ToyOrders}, Right: &Scan{T: ToyCustomers}, LeftKey: 1, RightKey: 0, Kind: LeftOuter})
+	if last := rows[len(rows)-1]; last[0] != int64(14) || last[4] != nil {
+		t.Fatalf("orphan order row = %v", last)
+	}
+}
+
+func TestGeneratorMatchesSpec(t *testing.T) {
+	c, p, o := Generate()
+	if len(c.Rows) != 200 || len(p.Rows) != 50 || len(o.Rows) != 5000 {
+		t.Fatal("wrong table sizes")
+	}
+	if c.Rows[16][3] != nil { // id 17 has NULL age
+		t.Fatalf("customer 17 age = %v, want NULL", c.Rows[16][3])
+	}
+}

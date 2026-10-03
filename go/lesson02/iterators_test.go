@@ -1,0 +1,38 @@
+package lesson02
+
+import "testing"
+
+func ageOver(n int64) func(Row) bool {
+	return func(r Row) bool { a, ok := r[3].(int64); return ok && a > n }
+}
+
+func TestFilterProject(t *testing.T) {
+	scan := &Scan{Table: "customers", Cols: CustomersSchema, Rows: Customers}
+	plan := &Project{
+		Child: &Filter{Child: scan, Pred: ageOver(30)},
+		Names: []string{"name"},
+		Exprs: []func(Row) Value{func(r Row) Value { return r[1] }},
+	}
+	rows := Collect(plan)
+	if len(rows) != 2 || rows[0][0] != "Ada" || rows[1][0] != "Cy" {
+		t.Fatalf("got %v", rows)
+	}
+}
+
+func TestLimitStopsPulling(t *testing.T) {
+	scan := &Scan{Table: "customers", Cols: CustomersSchema, Rows: Customers}
+	rows := Collect(&Limit{Child: scan, N: 1})
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows", len(rows))
+	}
+	if scan.RowsRead != 1 {
+		t.Fatalf("scan read %d rows; Limit should have stopped it after 1", scan.RowsRead)
+	}
+}
+
+func TestOperatorsAreReopenable(t *testing.T) {
+	plan := &Limit{Child: &Scan{Cols: CustomersSchema, Rows: Customers}, N: 3}
+	if a, b := len(Collect(plan)), len(Collect(plan)); a != 3 || b != 3 {
+		t.Fatalf("second run gave %d rows, want 3", b)
+	}
+}

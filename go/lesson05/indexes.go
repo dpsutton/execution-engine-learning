@@ -1,0 +1,76 @@
+// Package lesson05 is part 5: indexes. A B+tree (btree.go) answers "which rows have this value?"
+// by reading a handful of nodes instead of the whole table. Two operators use it:
+//
+//   - IndexScan: WHERE col = k, or col BETWEEN lo AND hi, without a full scan.
+//   - IndexNLJoin: a nested-loop join whose inner side is an index lookup instead of a rescan.
+//     For each outer row: one descent of the tree. This is the join you want when the outer side
+//     is small and the inner side is big and indexed.
+package lesson05
+
+// IndexScan fetches the rows whose indexed column matches a point or a range, in key order.
+type IndexScan struct {
+	T      *Table
+	Index  *BPlusTree
+	Eq     Value  // point lookup when non-nil
+	Lo, Hi *Bound // otherwise a range (nil = unbounded)
+
+	RowsFetched int
+
+	ids []int
+	pos int
+}
+
+func (s *IndexScan) Schema() []string { return s.T.Cols }
+func (s *IndexScan) Close()           {}
+func (s *IndexScan) Open() {
+	// A real engine walks the leaf chain lazily; collecting the ids up front keeps this short.
+	if s.Eq != nil {
+		s.ids = s.Index.Search(s.Eq)
+	} else {
+		s.ids = s.Index.Range(s.Lo, s.Hi)
+	}
+	s.pos = 0
+}
+func (s *IndexScan) Next() (Row, bool) {
+	if s.pos >= len(s.ids) {
+		return nil, false
+	}
+	s.pos++
+	s.RowsFetched++
+	return s.T.Rows[s.ids[s.pos-1]], true // "fetch the row by id": a random read in a real database
+}
+
+// IndexNLJoin: for each outer row, look its key up in the inner table's index.
+// Output = outer columns then inner columns; inner matches in index (insertion) order.
+type IndexNLJoin struct {
+	Outer    Operator
+	OuterKey int // column of the outer row to look up
+	Inner    *Table
+	Index    *BPlusTree // on the inner table's join column
+
+	Lookups int
+
+	cur Row
+	ids []int
+}
+
+func (j *IndexNLJoin) Schema() []string {
+	return append(append([]string{}, j.Outer.Schema()...), j.Inner.Cols...)
+}
+func (j *IndexNLJoin) Open()  { j.Outer.Open(); j.cur, j.ids = nil, nil }
+func (j *IndexNLJoin) Close() { j.Outer.Close() }
+func (j *IndexNLJoin) Next() (Row, bool) {
+	for len(j.ids) == 0 {
+		r, ok := j.Outer.Next()
+		if !ok {
+			return nil, false
+		}
+		j.cur = r
+		j.Lookups++
+		j.ids = j.Index.Search(r[j.OuterKey]) // one root-to-leaf descent per outer row
+	}
+	id := j.ids[0]
+	j.ids = j.ids[1:]
+	out := append(Row{}, j.cur...)
+	return append(out, j.Inner.Rows[id]...), true
+}

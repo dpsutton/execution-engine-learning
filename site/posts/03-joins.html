@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Part 3 · Joins — Execution Engine</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/common.js"></script>
+<script src="../assets/viz/03-joins.js" defer></script>
+<style>
+  .jn-grid { display: grid; grid-template-columns: auto minmax(9rem, 13rem) auto; gap: 1.2rem; align-items: start; margin-bottom: 1rem; justify-content: start; }
+  @media (max-width: 760px) { .jn-grid { grid-template-columns: 1fr; } }
+  .jn-label { font: 600 .7rem/1 var(--sans); text-transform: uppercase; letter-spacing: .08em; color: var(--ink-faint); margin: 0 0 .4rem; }
+  .jn-ht { display: flex; flex-direction: column; gap: .3rem; }
+  .jn-bucket { display: flex; align-items: center; gap: .3rem; min-height: 1.9rem; padding: .2rem .3rem; border: 1px solid var(--rule); border-radius: 6px; background: var(--bg); flex-wrap: wrap; }
+  .jn-bucket.on { border-color: var(--accent); background: var(--accent-soft); }
+  .jn-bi { font: 600 .72rem/1 var(--mono); color: var(--ink-faint); width: 1.1rem; text-align: center; }
+  .jn-entry { font: .74rem/1 var(--mono); padding: .25rem .35rem; border-radius: 4px; background: var(--teal-soft); color: var(--teal); }
+  .jn-entry.hit { background: var(--good-soft); color: var(--good); outline: 2px solid var(--good); }
+  .jn-entry.miss { background: var(--bad-soft); color: var(--bad); outline: 2px solid var(--bad); }
+  .jn-arrow { white-space: pre; font: .8rem/1.5 var(--mono); color: var(--ink-faint); text-align: center; padding-top: 2.5rem; }
+  .sc-row { display: grid; grid-template-columns: minmax(10rem, 15rem) 1fr 6rem; gap: .9rem; align-items: center; margin-bottom: .8rem; }
+  @media (max-width: 640px) { .sc-row { grid-template-columns: 1fr 5.5rem; } .sc-name { grid-column: 1 / -1; } }
+  .sc-name { display: flex; flex-direction: column; }
+  .sc-track { height: 1.1rem; background: var(--bg-sunk); border-radius: 4px; overflow: hidden; }
+  .sc-fill { display: block; height: 100%; border-radius: 4px; transition: width .25s; }
+  .sc-fill.nl { background: var(--bad); } .sc-fill.hash { background: var(--accent); } .sc-fill.merge { background: var(--teal); }
+  .sc-num { display: flex; flex-direction: column; text-align: right; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Execution Engine</a>
+  <span>Part 3 of 7</span>
+  <span class="spacer"></span>
+  <button class="theme-toggle" type="button">◐ auto</button>
+</header>
+
+<article>
+  <div class="kicker">Part 3 · Joins</div>
+  <h1>Nested loops, hash tables, and merging</h1>
+  <p class="dek">A join's definition is one line: every pair of rows where the condition holds.
+    There are three classic ways to compute it, and the difference between them is the difference
+    between a query that finishes in milliseconds and one that runs until somebody kills it.</p>
+
+  <div data-warmup></div>
+
+  <p>Everything so far has read one table. Real queries read several and stitch them together:
+    customers with their orders, orders with their products. In the iterator model a join is just
+    another operator, one with <em>two</em> children instead of one. It still has to answer the same
+    question as everything else: when someone calls <code>Next()</code>, what row do I return?</p>
+
+  <p>Our running example is the toy tables:</p>
+
+<pre><code>SELECT c.id, c.name, o.id, o.customer_id
+FROM customers c JOIN orders o ON o.customer_id = c.id</code></pre>
+
+  <p>Ada has two orders, Cy and Di have one each, and Bo has none. Order 14 belongs to a customer 9 who
+    doesn't exist. Those two oddities are there for outer joins later.</p>
+
+  <h2>The definition, executed literally: nested loop join</h2>
+
+  <p>"Every pair of rows where the condition holds" translates straight into code: for each row on
+    the left, look at every row on the right.</p>
+
+<pre class="pseudo">struct NLJoin { left, right, pred, cur }     -- cur: the current outer row
+  method Next()
+    loop
+      if cur is null then
+        (cur, ok) = left.Next()
+        if not ok then return (nil, false)
+        right.Rewind()                        -- start the inner side over
+      (r, ok) = right.Next()
+      if not ok then
+        cur = null                            -- inner exhausted: move to next outer row
+        continue
+      joined = concat(cur, r)
+      if pred(joined) == true then return (joined, true)
+</pre>
+
+  <p>Note the shape: the operator keeps <code>cur</code>, the outer row it's working on, as a field.
+    Each call to <code>Next()</code> picks up where the last one left off, partway through the inner
+    loop. It's the same trick as Limit's counter from part 2: the "loop" isn't a loop on the stack, it's
+    state on the heap that each call advances.</p>
+
+  <p>The cost is what it looks like: |L| × |R| evaluations of the predicate. Four customers times five
+    orders is 20. A thousand customers times a hundred thousand orders is a hundred million. Step
+    through it below, then switch to Hash and compare the counter.</p>
+
+  <div id="viz-joins"></div>
+
+  <p>Nested loops have one big thing going for them: <strong>they work for any condition.</strong> A
+    join on <code>o.qty &gt; c.age / 10</code>, or <code>ST_Contains(region, point)</code>, or
+    <code>a.ts BETWEEN b.start AND b.end</code> has no single key to hash or sort on. The nested loop
+    doesn't care; it just evaluates the predicate on every pair. Every engine keeps one around as the
+    fallback for whatever the other algorithms can't handle.</p>
+
+  <p>It's also the right choice more often than its complexity suggests. If the outer side has three
+    rows, a nested loop is three passes over the inner side with no hash table to build. And if the inner
+    side has an <em>index</em> on the join column, each "pass" becomes a lookup instead of a scan. That
+    is the index nested-loop join, which is part 5's topic and the workhorse of OLTP databases.</p>
+
+  <h2>Hash join: do the matching work once</h2>
+
+  <p>Most joins in practice are <strong>equi-joins</strong>: the condition is
+    <code>left.key = right.key</code>. For an equi-join, a nested loop throws away information. When it
+    compares Ada (id 1) with every order, it learns which orders have customer_id 1, and then it forgets
+    all of that and starts over for Bo.</p>
+
+  <p>A hash join remembers. It reads one side, the <strong>build</strong> side, once, and files every row
+    in a hash table under its join key. Then it reads the other side, the <strong>probe</strong> side,
+    and for each row looks up only the bucket where matches could be:</p>
+
+<pre class="pseudo">struct HashJoin { probe, build, probeKey, buildKey, table, cur, matches, i }
+  method Open()
+    probe.Open(); build.Open()
+    table = new HashMap(key -> [rows])        -- build phase: drain the build side
+    loop
+      (r, ok) = build.Next()
+      if not ok then break
+      k = buildKey(r)
+      if k is null then continue              -- NULL never equals anything
+      append(table[k], r)
+  method Next()
+    loop
+      if i &lt; len(matches) then               -- still emitting matches for cur
+        i = i + 1
+        return (concat(cur, matches[i - 1]), true)
+      (cur, ok) = probe.Next()                -- probe phase: one probe row at a time
+      if not ok then return (nil, false)
+      k = probeKey(cur)
+      matches = if k is null then [] else table[k]
+      i = 0
+</pre>
+
+  <p>In the figure the "hash table" is four buckets keyed by <code>customer_id mod 4</code>, so you can
+    see collisions happen. Customer 1 and the nonexistent customer 9 land in the same bucket, so
+    probing for Ada finds order 14 too, and the key comparison rejects it. A real hash table has many
+    more buckets and a better hash function, but it still compares keys after hashing, because hashing
+    only narrows down where to look.</p>
+
+  <p>Costs: every build row is hashed and inserted once, and every probe row is hashed and looked up
+    once. That's roughly |L| + |R| work instead of |L| × |R|, and for big inputs that's the whole ballgame.
+    The price is <strong>memory</strong>: the entire build side has to sit in the hash table before the
+    first output row comes out. Which side to build on is the engine's choice, since an inner join is
+    symmetric. The rule is to <strong>build on the smaller side</strong>. Get that wrong and you either
+    use far more memory than needed or spill to disk (more on spilling in part 4). Knowing which side
+    is smaller <em>before running the query</em> is a job for statistics, in part 6.</p>
+
+  <p>In iterator terms, the build is a pipeline breaker and the probe isn't. Building drains one child
+    completely during <code>Open()</code>; probing streams the other child one row at a time. So a
+    plan like <code>((A ⋈ B) ⋈ C)</code> can probe with A's rows all the way up through two hash tables
+    without ever materializing A.</p>
+
+  <div class="aside"><p>Our engines make hash join output deterministic. Probe rows come out in probe
+    order, and the matches for each probe row come out in the order they were inserted into the
+    build table. Go's maps iterate in random order, so the Go code keeps an ordered slice per key and
+    never ranges over the map to produce output. Real engines don't promise any order without an
+    <code>ORDER BY</code>. We want one anyway because each engine has two executors, the iterators and
+    part 7's bytecode VM, and testing that they produce the same rows is much easier when the order
+    is fixed.</p></div>
+
+  <h2>Sort-merge join: line both sides up</h2>
+
+  <p>The third classic algorithm sorts both inputs by the join key, then walks them in lockstep with
+    one cursor each, like the merge step of merge sort. At each step, compare the two keys. If the left
+    one is smaller, no remaining right row can match it, so advance left. If the right one is smaller,
+    advance right. If they're equal, emit the match.</p>
+
+<pre class="pseudo">function mergeJoin(L, R)                    -- both sorted by key
+  i = 0; j = 0
+  while i &lt; len(L) and j &lt; len(R)
+    if L[i].key &lt; R[j].key then i = i + 1
+    elif L[i].key &gt; R[j].key then j = j + 1
+    else
+      mark = j                                -- start of the run of equal keys
+      while j &lt; len(R) and R[j].key == L[i].key
+        emit(concat(L[i], R[j])); j = j + 1
+      i = i + 1
+      if i &lt; len(L) and L[i].key == L[i - 1].key then
+        j = mark                              -- duplicate on the left: replay the run
+</pre>
+
+  <p>The fiddly part is duplicates. Ada has two orders, so the right side has a run of equal keys.
+    If the left side had duplicates too, every left row in its run would have to pair with every right
+    row in the other run, which means rewinding the right cursor to the start of the run. That's the
+    <code>mark</code>/restore in the pseudocode.</p>
+
+  <p>Why would you ever do this instead of hashing, given that sorting costs <em>n</em> log <em>n</em>?
+    There are three reasons:</p>
+  <ul>
+    <li><strong>The inputs are already sorted.</strong> If both sides come out of a B+tree index on
+      the join key (part 5), or one side was sorted for an <code>ORDER BY</code> anyway, the sort is
+      free and the merge is a single linear pass with no hash table at all. Tick "already sorted" in
+      the figure below to see the difference.</li>
+    <li><strong>Memory.</strong> A merge join holds only the current run of equal keys. Sorting data
+      that doesn't fit in memory is a solved problem (external merge sort, next post), and so is
+      merging two sorted files. A hash join whose build side doesn't fit has to partition both sides to
+      disk first, which is more complicated.</li>
+    <li><strong>The output is sorted.</strong> The rows come out ordered by the join key, which a later
+      <code>ORDER BY</code>, merge join, or <code>GROUP BY</code> can use for free.</li>
+  </ul>
+
+  <h2>How they scale</h2>
+
+  <p>The toy tables make all three look about equally cheap. Drag the sizes up:</p>
+
+  <div id="viz-scale"></div>
+
+  <p>The nested loop's bar grows with the <em>product</em> of the sizes, while the hash join's grows with
+    the <em>sum</em>. Make both sides a million rows and the difference is a trillion operations, which is
+    hours, against two million, which is milliseconds. That's why the planner's most important job, by
+    far, is not picking a nested loop when it shouldn't.</p>
+
+  <h2>Outer joins</h2>
+
+  <p>An inner join drops rows that don't match: Bo, who has no orders, disappears, and so does order 14,
+    whose customer doesn't exist. A <strong>left outer join</strong> keeps every row from the left side.
+    If a left row matched nothing, it's emitted once, padded with NULLs for the right side's columns.
+    Switch the first figure to "Left outer" and watch Bo appear with NULLs.</p>
+
+  <p>Implementing this means tracking one bit per left row: <em>did anything match?</em></p>
+
+<pre class="pseudo">-- inside the probe loop of a hash join, per probe row:
+matches = table[probeKey(cur)]
+if len(matches) == 0 and kind == LEFT then
+  return (concat(cur, nulls(len(build.Schema()))), true)
+</pre>
+
+  <p>For a nested loop, it's a <code>matched</code> flag reset per outer row and checked when the inner
+    side runs out. Either way, the preserved side has to be the <em>outer</em> or <em>probe</em> side,
+    because that's the side where you know, row by row, when matching is finished. A right outer join
+    is a left outer join with the inputs swapped. A full outer join needs the other direction too: mark
+    every build row that ever matched, and after the probe side is exhausted, emit the unmarked build
+    rows (order 14 would show up there) padded with NULLs.</p>
+
+  <p>Outer joins also restrict the planner. <code>A JOIN B JOIN C</code> can be evaluated in any order,
+    because inner joins are associative and commutative. <code>A LEFT JOIN B</code> can't simply be
+    flipped. The integrated engine supports only inner joins, so part 6's planner can reorder freely;
+    the lesson code implements left joins so you can see the mechanics.</p>
+
+  <h2>Choosing</h2>
+
+  <table class="data" style="margin-bottom:1.4rem">
+    <thead><tr><th>algorithm</th><th>conditions</th><th>cost</th><th>memory</th><th>good when</th></tr></thead>
+    <tbody>
+      <tr><td>nested loop</td><td>any</td><td>|L|·|R|</td><td>O(1)</td><td>tiny outer side; non-equi conditions</td></tr>
+      <tr><td>index nested loop</td><td>equality / range on an indexed column</td><td>|L|·log|R|</td><td>O(1)</td><td>small outer side, big indexed inner (part 5)</td></tr>
+      <tr><td>hash</td><td>equality only</td><td>|L|+|R|</td><td>build side</td><td>the default for big equi-joins</td></tr>
+      <tr><td>sort-merge</td><td>equality (and some ranges)</td><td>sort + |L|+|R|</td><td>a run of equal keys</td><td>inputs already sorted; memory-tight</td></tr>
+    </tbody>
+  </table>
+
+  <p>That table is the start of a cost model. Every row of it depends on knowing |L| and |R|, and
+    usually not the base table sizes but how many rows survive the filters below the join. Those
+    numbers aren't known until the query runs. Estimating them anyway is part 6.</p>
+
+  <div class="sqlglot"><p>sqlglot's executor implements two of these. For an equality condition it
+    runs a hash join: it builds a dict from key tuple to row indexes on one side, then loops over the
+    other. Otherwise it falls back to a nested loop that evaluates the condition on every pair. Both
+    produce a complete output <code>Table</code> before the next step starts, so even the probe side
+    doesn't stream. Outer joins work the same way as here: probe rows with no match get padded with
+    NULLs.</p></div>
+
+  <div class="code-ref"><p><code>go/lesson03/joins.go</code> · <code>clojure/src/lesson03/joins.clj</code>
+    (ns <code>lesson03.joins</code>). NLJoin, HashJoin, and MergeJoin as iterators over the toy tables,
+    inner and left outer, each counting its key comparisons. The demo runs the same join all three ways and
+    prints the counts: <code>go run ./cmd/lesson03</code> / <code>clojure -M -m lesson03.joins</code>.</p></div>
+
+  <div class="build-it"><p>The exercise track for this part has the reference lesson with the
+    interesting function bodies replaced by TODOs, and tests that fail until you fill them in. For this
+    part: <code>nl-join-next</code>, <code>hash-join-build</code>, <code>hash-join-probe</code>, <code>merge-join-next</code> (see <a href="../../EXERCISES.md">EXERCISES.md</a> for the current list and hints).</p>
+    <p><code>cd go &amp;&amp; go test ./exercises/lesson03/</code><br>
+    <code>cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson03.joins-test</code></p></div>
+
+  <div class="takeaway"><p>A nested loop works for any condition but does |L|·|R| work. For equi-joins,
+    hash the smaller side once and probe with the other (|L|+|R| work, build side in memory), or merge
+    two sorted inputs when the sort is free. Outer joins add a "did anything match?" bit on the
+    preserved side. Choosing well depends on knowing input sizes before you run.</p></div>
+
+  <div data-series></div>
+</article>
+</body>
+</html>

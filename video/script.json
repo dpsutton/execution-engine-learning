@@ -1,0 +1,40 @@
+[
+  {"id": "hook", "lead": 0.7, "tail": 0.7, "phrases": [
+    ["Every SQL query you've ever written is a tree.", 0]]},
+  {"id": "inside", "lead": 0.3, "tail": 0.9, "phrases": [
+    ["Somewhere, something walks that tree, and turns it into rows.", 0.35],
+    ["Most of us never look inside.", 0]]},
+  {"id": "title", "lead": 0.5, "tail": 1.3, "phrases": [
+    ["So let's build one.", 0.45],
+    ["A query execution engine, from scratch, in seven parts.", 0]]},
+  {"id": "pull", "lead": 0.4, "tail": 0.8, "phrases": [
+    ["Start with one row, and one expression.", 0.4],
+    ["Then operators that pull rows, one at a time, up through a plan.", 0]]},
+  {"id": "joins", "lead": 0.4, "tail": 1.2, "phrases": [
+    ["Join two hundred customers to five thousand orders.", 0.4],
+    ["A nested loop makes a million comparisons.", 0.5],
+    ["A hash join?", 0.45],
+    ["About five thousand.", 0]]},
+  {"id": "indexes", "lead": 0.4, "tail": 1.1, "phrases": [
+    ["Add a B-plus tree,", 0.2],
+    ["and finding one customer's orders goes from reading five thousand rows,", 0.3],
+    ["to touching two pages.", 0]]},
+  {"id": "planner", "lead": 0.4, "tail": 1.2, "phrases": [
+    ["Then teach the engine to guess.", 0.4],
+    ["Histograms. Selectivity. Join order.", 0.45],
+    ["And watch exactly where the guesses go wrong.", 0]]},
+  {"id": "bytecode", "lead": 0.4, "tail": 1.4, "phrases": [
+    ["Finally, compile the whole plan into bytecode, like SQLite does.", 0.5],
+    ["And find a strange superpower:", 0.45],
+    ["a query you can pause,", 0.4],
+    ["save,", 0.4],
+    ["and resume.", 0.5],
+    ["Somewhere else entirely.", 0]]},
+  {"id": "tease", "lead": 0.5, "tail": 1.0, "phrases": [
+    ["How?", 0.5],
+    ["That's part seven.", 0]]},
+  {"id": "outro", "lead": 0.4, "tail": 3.0, "phrases": [
+    ["Interactive figures in every post.", 0.3],
+    ["Working engines in Go and Closure.", 0.45],
+    ["Build your own.", 0]]}
+]

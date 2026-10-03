@@ -1,0 +1,15 @@
+.cpcache/
+.nrepl-port
+*.class
+/go/bin/
+.DS_Store
+video/tts/*.onnx
+video/tts/*.bin
+video/frames/
+video/build/
+execution-engine.apkg
+video/node_modules/
+# trailer render output (regenerate: see video/README.md)
+video/*.mp4
+__pycache__/
+.venv/

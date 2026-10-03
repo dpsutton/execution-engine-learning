@@ -1,0 +1,123 @@
+(ns lesson07.bytecode
+  "Lesson 7 — compiling plans to bytecode, and why that makes queries resumable.
+
+  The previous lessons ran a plan by calling next! down a tree of operator objects: the progress
+  of a query lived in those objects AND on the call stack. Here the plan is compiled (by
+  lesson07.compiler) into a flat program for a register machine (lesson07.vm), and the progress
+  of the query is one plain map: program counter, registers, cursor positions, hash tables.
+
+  The demo shows:
+  1. a small query's program, SQLite-EXPLAIN style
+  2. a join + GROUP BY + ORDER BY program, and its result
+  3. running it a few instructions at a time (fuel), snapshotting the state to an EDN string
+     mid-query, throwing the machine away, reading the string back, and finishing — with the
+     same answer as an uninterrupted run."
+  (:require [clojure.pprint :as pp]
+            [clojure.string :as str]
+            [lesson07.compiler :as compiler]
+            [lesson07.vm :as vm]))
+
+(def toy-db
+  {"customers" {:columns ["id" "name" "city" "age"]
+                :rows    [[1 "Ada" "Austin" 36] [2 "Bo" "Boston" nil] [3 "Cy" "Austin" 52] [4 "Di" "Denver" 29]]}
+   "orders"    {:columns ["id" "customer_id" "product_id" "qty"]
+                :rows    [[10 1 100 2] [11 1 101 1] [12 3 100 5] [13 4 102 1] [14 9 101 3]]}
+   "products"  {:columns ["id" "name" "category" "price"]
+                :rows    [[100 "Pen" "tools" 1.50] [101 "Atlas" "books" 24.00] [102 "Chess" "games" 18.25]]}})
+
+(def simple-plan
+  "SELECT name, age FROM customers WHERE age > 30 LIMIT 1"
+  {:op :limit :n 1
+   :child {:op :project :items [[[:col "name"] "name"] [[:col "age"] "age"]]
+           :child {:op :filter :pred [:> [:col "age"] [:lit 30]]
+                   :child {:op :scan :table "customers" :alias "c"}}}})
+
+(def report-plan
+  "SELECT c.name, count(*) AS orders, sum(o.qty) AS units
+     FROM orders o JOIN customers c ON o.customer_id = c.id
+    GROUP BY c.name ORDER BY units DESC"
+  {:op :sort :keys [[[:col "units"] :desc]]
+   :child {:op :aggregate
+           :group [[:col "c.name"]]
+           :aggs [{:fn "count" :arg :* :name "orders"} {:fn "sum" :arg [:col "o.qty"] :name "units"}]
+           :child {:op :hash-join
+                   :left  {:op :scan :table "orders" :alias "o"}
+                   :right {:op :scan :table "customers" :alias "c"}
+                   :left-key [:col "o.customer_id"] :right-key [:col "c.id"]}}})
+
+(defn- format-value [v] (cond (nil? v) "NULL" (double? v) (format "%.2f" v) :else (str v)))
+
+(defn print-table [columns rows]
+  (let [cells  (cons (vec columns) (map #(mapv format-value %) rows))
+        widths (apply map (fn [& col] (apply max (map count col))) cells)
+        line   (fn [r] (str/join " | " (map (fn [w c] (format (str "%-" w "s") c)) widths r)))]
+    (println (line (first cells)))
+    (println (str/join "-+-" (map #(apply str (repeat % "-")) widths)))
+    (doseq [r (rest cells)] (println (line r)))))
+
+(defn- header [s] (println) (println (str "== " s " " (apply str (repeat (max 0 (- 70 (count s))) "=")))))
+
+(defn -main [& _]
+  (header "A small program")
+  (println (:doc (meta #'simple-plan)))
+  (println)
+  (let [{:keys [program columns]} (compiler/compile-plan simple-plan toy-db)]
+    (println (vm/listing program))
+    (println)
+    (println "Read it like SQLite's EXPLAIN: Rewind/Column…/Next is the scan loop; the filter is one")
+    (println "IfNot jumping to Next. The projection is just two Copy instructions lining up name and age")
+    (println "for ResultRow, which hands a row back to the caller. DecrJumpZero is the LIMIT.")
+    (println)
+    (print-table columns (vm/run-all program toy-db)))
+
+  (let [{:keys [program columns]} (compiler/compile-plan report-plan toy-db)
+        expected (vm/run-all program toy-db)]
+    (header "Join + GROUP BY + ORDER BY")
+    (println (str/replace (:doc (meta #'report-plan)) #"\n\s+" "\n"))
+    (println)
+    (println (vm/listing program))
+    (println)
+    (println "Three loops, separated by the pipeline breakers: build the hash table from customers;")
+    (println "probe it with each order and accumulate groups; iterate groups into the sorter; iterate")
+    (println "the sorted rows.")
+    (println)
+    (print-table columns expected)
+
+    (header "Pause, snapshot, resume")
+    (println "Run with 25 instructions of fuel at a time. After the third slice, snapshot the state.")
+    (println)
+    (let [snap (loop [s (vm/new-state) slice 1 rows []]
+                 (let [{:keys [state row status]} (vm/resume s program toy-db 25)]
+                   (case status
+                     :row (recur state slice (conj rows row))
+                     :out-of-fuel (do (println (format "  slice %d: out of fuel at pc=%-3d steps=%-4d rows so far: %s"
+                                                       slice (:pc state) (:steps state) (pr-str rows)))
+                                      (if (= slice 3) {:snapshot (vm/snapshot state) :rows rows :state state}
+                                          (recur state (inc slice) rows)))
+                     :done (throw (ex-info "finished before the snapshot" {})))))]
+      (println)
+      (println (format "The snapshot is %d characters of EDN. Here it is, pretty-printed:" (count (:snapshot snap))))
+      (println)
+      (pp/pprint (update (vm/restore (:snapshot snap)) :regs #(into (sorted-map) %)))
+      (println)
+      (let [st (:state snap)]
+        (println (format "Mid-query: the hash table is built, the probe loop is on orders row %d, and %d group(s)"
+                         (get-in st [:cursors 1 :pos]) (count (get-in st [:aggs 0 :groups]))))
+        (println "are accumulating. No objects, no closures, no call stack: one map."))
+      (println "Round trip is lossless?" (= (:state snap) (vm/restore (:snapshot snap))))
+      (println)
+      (println "Throw the machine away. Later — another thread, another process — read the string and finish:")
+      (let [rows (loop [s (vm/restore (:snapshot snap)) rows (:rows snap)]
+                   (let [{:keys [state row status]} (vm/resume s program toy-db 1000)]
+                     (case status :row (recur state (conj rows row)) :out-of-fuel (recur state rows) :done rows)))]
+        (print-table columns rows)
+        (println)
+        (println "Same as the uninterrupted run?" (= rows expected))))
+
+    (header "Fuel as a guardrail")
+    (let [{:keys [state]} (loop [s (vm/new-state)]
+                            (let [r (vm/resume s program toy-db Long/MAX_VALUE)]
+                              (if (= :done (:status r)) r (recur (:state r)))))]
+      (println (format "This query takes %d instructions. A budget is a counter checked in the dispatch loop:" (:steps state)))
+      (println "a query that blows it stops cleanly between two instructions — and can be resumed later")
+      (println "rather than killed. Compare an interpreter that can only be interrupted from outside."))))

@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Part 5 · Indexes — Execution Engine</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/common.js"></script>
+<script src="../assets/viz/05-indexes.js" defer></script>
+<style>
+  .bt-group { display: inline-flex; gap: .3rem; align-items: center; color: var(--ink-faint); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Execution Engine</a>
+  <span>Part 5 of 7</span>
+  <span class="spacer"></span>
+  <button class="theme-toggle" type="button">◐ auto</button>
+</header>
+
+<article>
+  <div class="kicker">Part 5 · Indexes</div>
+  <h1>B+trees and not reading the whole table</h1>
+  <p class="dek">Every operator so far starts with a Scan that reads every row. An index lets you
+    jump to the rows you want. This part covers how a B+tree does that, what an index scan and an
+    index nested-loop join look like as operators, and when an index makes things worse.</p>
+
+  <div data-warmup></div>
+
+  <p>Take <code>SELECT * FROM orders WHERE customer_id = 7</code> against the generated dataset:
+    5,000 orders, 126 of which belong to customer 7. Part 2's plan is
+    <code>Filter(customer_id = 7, Scan(orders))</code>. It reads all 5,000 rows and evaluates the
+    predicate 5,000 times to keep 126. The filter can't do better, because it only sees one row at a
+    time and has no idea where the next match is.</p>
+
+  <p>To skip the other 4,874 rows, we need a second structure that is <em>sorted by
+    <code>customer_id</code></em> and points back at rows. That structure is an index. The question is
+    what shape it should have.</p>
+
+  <h2>Why a tree</h2>
+
+  <p>Three candidates, all of them reasonable:</p>
+  <ul>
+    <li><strong>A sorted array of <code>(key, row id)</code>.</strong> Binary search finds a key in
+      log₂(n) steps, and a range is a contiguous slice. But inserting a key shifts on average half
+      the array, so every insert is O(n).</li>
+    <li><strong>A hash table from key to row ids.</strong> Lookups are O(1) and inserts are cheap. But
+      it has no order, so <code>customer_id BETWEEN 5 AND 9</code> or <code>ORDER BY customer_id</code>
+      get no help at all.</li>
+    <li><strong>A balanced search tree.</strong> It has the sorted array's ordering and supports
+      cheap inserts. The question is the fanout.</li>
+  </ul>
+
+  <p>A binary tree over a million keys is 20 levels deep, and every level is a pointer chase,
+    meaning a cache miss in memory or a page read on disk. A <strong>B+tree</strong> fixes that by
+    making nodes wide. Each node holds up to <em>order − 1</em> keys and <em>order</em> children.
+    With order 200, which is typical for 8 KB pages and small keys, a million keys fit in three
+    levels and a billion fit in four. The root and the second level stay hot in cache, so a lookup
+    costs one or two real reads.</p>
+
+  <p>The "+" adds two rules on top of a plain B-tree:</p>
+  <ol>
+    <li><strong>All keys live in the leaves.</strong> Inner nodes only hold <em>separator</em> keys
+      that route a search, copied up from the leaves. A separator <code>k</code> means "keys ≥ k go
+      right".</li>
+    <li><strong>Leaves are linked left to right.</strong> Once you find where a range starts, you
+      walk sideways along the leaves instead of going back up the tree.</li>
+  </ol>
+
+<pre class="pseudo">function search(tree, key)
+  node = tree.root
+  while not node.leaf
+    i = count of separators s in node.keys where key >= s
+    node = node.children[i]                -- one node per level: height visits total
+  return entries in node with entry.key == key
+
+function rangeScan(tree, lo, hi)
+  leaf = descend to the leaf where lo would be      -- same loop as search
+  loop
+    for each entry in leaf
+      if entry.key > hi then return
+      if entry.key >= lo then yield entry.rowId
+    leaf = leaf.next                       -- the "+" in B+tree
+    if leaf is null then return
+</pre>
+
+  <p>Inserting is where the balance comes from. You descend to the right leaf and insert in sorted
+    position. If the leaf now holds too many keys, you <strong>split</strong> it in half and push the
+    first key of the right half up into the parent as a new separator. If that overflows the parent,
+    it splits too, pushing its middle key up. If the root splits, a new root is created above it.
+    That's the only way the tree grows taller, which is why every leaf is always at the same depth.</p>
+
+<pre class="pseudo">function insert(node, key, rowId) -> split or null
+  if node.leaf
+    insert (key, rowId) into node.keys in sorted position
+    if len(node.keys) &lt;= order - 1 then return null
+    right = new leaf with the upper half of node.keys
+    right.next = node.next;  node.next = right
+    return (right.keys[0], right)          -- separator is COPIED up; it stays in the leaf
+  i = childIndex(node, key)
+  split = insert(node.children[i], key, rowId)
+  if split is null then return null
+  add split.key and split.right to node at position i
+  if len(node.keys) &lt;= order - 1 then return null
+  mid = len(node.keys) / 2
+  right = new inner node with keys after mid and their children
+  return (node.keys[mid], right)           -- inner split: middle key MOVES up
+</pre>
+
+  <p>Try it. Order 3 makes splits happen constantly, which is the easiest way to see the mechanism.
+    Insert keys one at a time and watch which leaf overflows. <strong>Search</strong> lights up the
+    root-to-leaf path. <strong>Range scan</strong> descends once, then follows the dashed leaf
+    links.</p>
+
+  <div id="viz-btree"></div>
+
+  <p>Two things to notice in the figure. First, a search visits exactly <em>height</em> nodes,
+    whether the key exists or not. Second, the range scan's cost is <em>height + leaves touched</em>:
+    one descent, then a sideways walk proportional to the size of the answer, not the size of the
+    table.</p>
+
+  <div class="aside"><p>Our lesson's tree is in memory, so "node" means an object and visits are
+    pointer chases. On disk, one node is one page, and the fanout comes from fitting as many
+    separators as possible into it. Everything else (splits, leaf links, height) is identical. The
+    integrated engine uses order 32: no pages to fill, but still shallow trees and short leaf walks.</p></div>
+
+  <h2>Indexes as operators</h2>
+
+  <p>An index on its own only produces row ids. To use it in a query, we need it to be an operator
+    with the same <code>Open / Next / Close</code> shape as everything since part 2. There are two
+    useful ones.</p>
+
+  <h3>IndexScan</h3>
+
+  <p>An <code>IndexScan(table, index, lo, hi)</code> replaces <code>Filter(pred, Scan(table))</code>
+    when the predicate is an equality or range on the indexed column:</p>
+
+<pre class="pseudo">IndexScan.Open()
+  cursor = rangeScan(index, lo, hi)        -- a lazy iterator over row ids
+
+IndexScan.Next()
+  rowId = cursor.next()
+  if rowId is none then return (null, false)
+  return (table.rows[rowId], true)         -- the "fetch": index entry -> actual row
+</pre>
+
+  <p>The last line is easy to skip over, and it's the one that decides whether the index helps.
+    Our index is <em>secondary</em>: it's a separate structure, and its leaves hold row ids. Each
+    match costs a lookup into the table. In memory that's an array index. On disk it's a random
+    page read, because rows matching <code>customer_id = 7</code> are scattered through the table in
+    whatever order they were inserted.</p>
+
+  <p>A <em>clustered</em> index (SQLite's rowid tables, InnoDB's primary key, a Postgres table right
+    after <code>CLUSTER</code>) stores the rows themselves in key order, so matching rows sit next
+    to each other and the fetch is free or sequential. A <em>covering</em> index includes every
+    column the query needs, so the fetch disappears entirely.</p>
+
+  <h3>Index nested-loop join</h3>
+
+  <p>The more important use is inside a join. Part 3's nested loop join rescans the entire inner
+    input once per outer row, costing <code>|outer| × |inner|</code>. If the inner side is a base
+    table with an index on the join column, you can replace that rescan with a seek:</p>
+
+<pre class="pseudo">IndexNLJoin.Next()
+  loop
+    if matches has more
+      return (outerRow ++ table.rows[matches.next()], true)
+    (outerRow, ok) = outer.Next()
+    if not ok then return (null, false)
+    key = eval(outerKey, outerRow)
+    if key is null then continue           -- NULL never joins
+    matches = search(index, key)           -- height node visits, not |inner| rows
+</pre>
+
+  <p>The cost becomes <code>|outer| × (height + matches per key)</code>. Compared with part 3's hash
+    join, there's no build phase and no hash table in memory. The index <em>is</em> the hash table,
+    built ahead of time and kept up to date on every insert. That makes the index NL join the best
+    plan when the outer side is small, as in "these 20 customers and their orders". The hash join
+    wins when both sides are large and you'd do millions of seeks. Choosing between them requires
+    knowing how big the outer side will be, which is what part 6 is about.</p>
+
+  <div class="sqlglot"><p>sqlglot's executor has no indexes at all. Its <code>Scan</code> step
+    iterates a Python list, filters and projects in one pass, and materializes the result. Joins are
+    a hash join on equality conditions, with a nested loop fallback otherwise. Its planner never
+    considers access paths, because the input tables are plain lists of dicts. That's fine for
+    what it is. It's also why the interesting optimizer decisions in a real database (index or scan,
+    which join algorithm) don't arise there.</p></div>
+
+  <h2>When an index makes it worse</h2>
+
+  <p>Indexes aren't free speed. A full scan reads pages in order, which disks and prefetchers are
+    very good at. An index scan through a secondary index does a few node visits, then one random
+    fetch per matching row. With 1% of a million-row table matching, that's 10,000 random reads,
+    and if 100 rows fit on a page the full scan was only 10,000 sequential reads to begin with.</p>
+
+  <p>The figure plots both, plus a clustered index, as the fraction of matching rows changes.
+    Random page cost is the ratio of a random read to a sequential one. Postgres defaults
+    <code>random_page_cost</code> to 4. In memory it's closer to 1–2 (a cache miss versus a
+    prefetched line).</p>
+
+  <div id="viz-crossover"></div>
+
+  <p>The crossover is surprisingly low. At the default ratio, a secondary index is only worth using
+    below roughly a quarter of a percent of the table. Above that, the planner should ignore the
+    index and scan. That's why planners need <em>selectivity estimates</em>: the same query with
+    <code>customer_id = 7</code> (126 rows, 2.5% of orders in our skewed data) and
+    <code>customer_id = 150</code> (11 rows) can deserve different plans.</p>
+
+  <p>A clustered index changes the picture completely, because the fetch is sequential. That's why
+    the choice of clustering key matters so much in InnoDB and SQL Server, and why Postgres has
+    bitmap heap scans: they collect row ids from the index, sort them by page, and fetch each page
+    once, turning random reads back into something closer to sequential ones.</p>
+
+  <div class="code-ref"><p><code>go/lesson05/indexes.go</code> · <code>clojure/src/lesson05/indexes.clj</code>
+    (ns <code>lesson05.indexes</code>): a B+tree with configurable order and node-visit counters, an
+    <code>IndexScan</code>, and an <code>IndexNLJoin</code>. The demo builds an index on
+    <code>orders.customer_id</code>, prints a small tree, and compares node visits against a full scan.
+    Run with <code>go run ./cmd/lesson05</code> or <code>clojure -M -m lesson05.indexes</code>.</p></div>
+
+  <div class="build-it"><p>Write the B+tree yourself: leaf and inner splits on insert, the root-to-leaf search, and the range scan that walks the leaf links. The exercise track for this part (<code>btree-split</code>, <code>btree-search</code>, <code>btree-range</code>)
+    strips those function bodies out of the lesson and leaves the tests. Fill them in until the tests pass:</p>
+<pre><code>cd go &amp;&amp; go test ./exercises/lesson05/
+cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson05.indexes-test</code></pre>
+    <p>Hints and the full list are in <a href="../../EXERCISES.md">EXERCISES.md</a>.</p></div>
+
+  <div class="takeaway"><p>A B+tree keeps keys sorted in wide, shallow nodes with linked leaves, so
+    a lookup costs <em>height</em> visits and a range scan costs <em>height + answer size</em>. As an
+    operator, it turns a filtered scan into an index scan and a nested-loop join into a sequence of
+    seeks. Whether either one is a win depends on how many rows match, so the planner has to
+    estimate that.</p></div>
+
+  <div data-series></div>
+</article>
+</body>
+</html>

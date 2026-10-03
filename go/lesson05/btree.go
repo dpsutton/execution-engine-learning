@@ -1,0 +1,255 @@
+package lesson05
+
+import (
+	"sort"
+	"strings"
+)
+
+// BPlusTree maps column values to row ids (positions in the table).
+//
+//   - Internal nodes hold only separator keys and child pointers: "keys < k go left".
+//   - Leaves hold every key, each with the ids of the rows carrying it (a posting list, so
+//     duplicate values cost one entry), and a pointer to the next leaf. A range scan finds its
+//     starting leaf once and then just follows next pointers.
+//   - Every leaf is at the same depth. With order m, a node has at most m children (m-1 keys), so a
+//     tree over n keys is about log_m(n) levels tall. Real databases use m in the hundreds, sized
+//     to fill a disk page: three or four levels cover billions of rows.
+//
+// NULLs are not indexed (col = NULL never matches anyway).
+type BPlusTree struct {
+	Order int
+	root  *node
+
+	NodeVisits int // nodes touched by searches/scans since creation (the I/O we'd pay on disk)
+}
+
+type node struct {
+	leaf     bool
+	keys     []Value
+	children []*node // internal: len(keys)+1 children
+	rowIDs   [][]int // leaf: one posting list per key
+	next     *node   // leaf: right sibling
+}
+
+func NewBPlusTree(order int) *BPlusTree {
+	if order < 3 {
+		panic("order must be ≥ 3")
+	}
+	return &BPlusTree{Order: order, root: &node{leaf: true}}
+}
+
+// BuildIndex indexes one column of a table.
+func BuildIndex(t *Table, col int, order int) *BPlusTree {
+	tree := NewBPlusTree(order)
+	for id, r := range t.Rows {
+		tree.Insert(r[col], id)
+	}
+	return tree
+}
+
+// childFor picks which child of an internal node may contain key: the first separator greater
+// than key bounds it.
+func childFor(n *node, key Value) int {
+	return sort.Search(len(n.keys), func(i int) bool { return Compare(n.keys[i], key) > 0 })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Insert
+// ---------------------------------------------------------------------------------------------
+
+// Insert adds (key → rowID). Splits propagate upward; when the root splits, the tree grows a new
+// root — the only way a B+tree gets taller, which is why all leaves stay at the same depth.
+func (t *BPlusTree) Insert(key Value, rowID int) {
+	if key == nil {
+		return
+	}
+	sep, right := t.insert(t.root, key, rowID)
+	if right != nil {
+		t.root = &node{keys: []Value{sep}, children: []*node{t.root, right}}
+	}
+}
+
+// insert returns (separator, new right sibling) if n split, else (nil, nil).
+func (t *BPlusTree) insert(n *node, key Value, rowID int) (Value, *node) {
+	// EXERCISE(btree-split): Insert into the right leaf (extending the posting list if the key exists). When a node
+	// overflows, split it in half and return the separator and new right sibling to the parent:
+	// leaves copy their first right key up, internal nodes move the middle key up.
+	maxKeys := t.Order - 1
+	if n.leaf {
+		i := sort.Search(len(n.keys), func(i int) bool { return Compare(n.keys[i], key) >= 0 })
+		if i < len(n.keys) && Compare(n.keys[i], key) == 0 {
+			n.rowIDs[i] = append(n.rowIDs[i], rowID) // existing key: extend its posting list
+			return nil, nil
+		}
+		n.keys = insertAt(n.keys, i, key)
+		n.rowIDs = insertAt(n.rowIDs, i, []int{rowID})
+		if len(n.keys) <= maxKeys {
+			return nil, nil
+		}
+		// Leaf split: the right half moves to a new leaf; its first key is *copied* up.
+		mid := len(n.keys) / 2
+		right := &node{leaf: true,
+			keys:   append([]Value{}, n.keys[mid:]...),
+			rowIDs: append([][]int{}, n.rowIDs[mid:]...),
+			next:   n.next}
+		n.keys, n.rowIDs, n.next = n.keys[:mid], n.rowIDs[:mid], right
+		return right.keys[0], right
+	}
+
+	i := childFor(n, key)
+	sep, newChild := t.insert(n.children[i], key, rowID)
+	if newChild == nil {
+		return nil, nil
+	}
+	n.keys = insertAt(n.keys, i, sep)
+	n.children = insertAt(n.children, i+1, newChild)
+	if len(n.keys) <= maxKeys {
+		return nil, nil
+	}
+	// Internal split: the middle key *moves* up (it isn't needed in either half).
+	mid := len(n.keys) / 2
+	up := n.keys[mid]
+	right := &node{
+		keys:     append([]Value{}, n.keys[mid+1:]...),
+		children: append([]*node{}, n.children[mid+1:]...)}
+	n.keys, n.children = n.keys[:mid], n.children[:mid+1]
+	return up, right
+	// END EXERCISE
+}
+
+func insertAt[T any](s []T, i int, v T) []T {
+	s = append(s, v)
+	copy(s[i+1:], s[i:])
+	s[i] = v
+	return s
+}
+
+// ---------------------------------------------------------------------------------------------
+// Search and range scan
+// ---------------------------------------------------------------------------------------------
+
+// findLeaf descends from the root to the leaf that would contain key, counting visits.
+func (t *BPlusTree) findLeaf(key Value) *node {
+	// EXERCISE(btree-search): Descend from the root to the leaf that could hold key, choosing a child at each internal
+	// node; count every node visited.
+	n := t.root
+	t.NodeVisits++
+	for !n.leaf {
+		n = n.children[childFor(n, key)]
+		t.NodeVisits++
+	}
+	return n
+	// END EXERCISE
+}
+
+// Search returns the row ids whose key equals key: one root-to-leaf descent.
+func (t *BPlusTree) Search(key Value) []int {
+	if key == nil {
+		return nil
+	}
+	leaf := t.findLeaf(key)
+	for i, k := range leaf.keys {
+		if Compare(k, key) == 0 {
+			return leaf.rowIDs[i]
+		}
+	}
+	return nil
+}
+
+// Bound is one end of a range; a nil *Bound means unbounded.
+type Bound struct {
+	Key       Value
+	Inclusive bool
+}
+
+// Range returns row ids with lo ≤/< key ≤/< hi, in key order: descend once to the start, then walk
+// the leaf chain until past hi.
+func (t *BPlusTree) Range(lo, hi *Bound) []int {
+	// EXERCISE(btree-range): Find the starting leaf (or the leftmost one), then walk the leaf chain collecting row ids
+	// for keys inside the bounds, stopping at the first key past hi. Count node visits.
+	var leaf *node
+	if lo != nil {
+		leaf = t.findLeaf(lo.Key)
+	} else { // unbounded below: the leftmost leaf
+		leaf = t.root
+		t.NodeVisits++
+		for !leaf.leaf {
+			leaf = leaf.children[0]
+			t.NodeVisits++
+		}
+	}
+	var out []int
+	for first := true; leaf != nil; leaf, first = leaf.next, false {
+		if !first {
+			t.NodeVisits++ // following a sibling pointer is another node read
+		}
+		for i, k := range leaf.keys {
+			if lo != nil {
+				if c := Compare(k, lo.Key); c < 0 || (c == 0 && !lo.Inclusive) {
+					continue
+				}
+			}
+			if hi != nil {
+				if c := Compare(k, hi.Key); c > 0 || (c == 0 && !hi.Inclusive) {
+					return out
+				}
+			}
+			out = append(out, leaf.rowIDs[i]...)
+		}
+	}
+	return out
+	// END EXERCISE
+}
+
+// Height is the number of levels (a lone leaf is height 1).
+func (t *BPlusTree) Height() int {
+	h, n := 1, t.root
+	for !n.leaf {
+		n, h = n.children[0], h+1
+	}
+	return h
+}
+
+// ---------------------------------------------------------------------------------------------
+// Printing (for small trees)
+// ---------------------------------------------------------------------------------------------
+
+// String draws the tree sideways, root first. Leaves show key(→row ids).
+func (t *BPlusTree) String() string {
+	var b strings.Builder
+	var walk func(n *node, prefix string, last bool, root bool)
+	walk = func(n *node, prefix string, last bool, root bool) {
+		branch, childPrefix := "├─ ", prefix+"│  "
+		if last {
+			branch, childPrefix = "└─ ", prefix+"   "
+		}
+		if root {
+			branch, childPrefix = "", prefix
+		}
+		b.WriteString(prefix + branch + describe(n) + "\n")
+		for i, c := range n.children {
+			walk(c, childPrefix, i == len(n.children)-1, false)
+		}
+	}
+	walk(t.root, "", true, true)
+	return b.String()
+}
+
+func describe(n *node) string {
+	parts := make([]string, len(n.keys))
+	for i, k := range n.keys {
+		if n.leaf {
+			ids := make([]string, len(n.rowIDs[i]))
+			for j, id := range n.rowIDs[i] {
+				ids[j] = Format(int64(id))
+			}
+			parts[i] = Format(k) + "→" + strings.Join(ids, ",")
+		} else {
+			parts[i] = Format(k)
+		}
+	}
+	if n.leaf {
+		return "leaf [" + strings.Join(parts, "  ") + "]"
+	}
+	return "[" + strings.Join(parts, " | ") + "]"
+}

@@ -1,0 +1,86 @@
+package lesson04
+
+import (
+	"sort"
+	"testing"
+)
+
+func rowsAsStrings(rows []Row, sorted bool) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = FormatRow(r)
+	}
+	if sorted {
+		sort.Strings(out)
+	}
+	return out
+}
+
+func equal(t *testing.T, what string, a, b []string) {
+	t.Helper()
+	if len(a) != len(b) {
+		t.Fatalf("%s: %d vs %d rows", what, len(a), len(b))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("%s: row %d: %q vs %q", what, i, a[i], b[i])
+		}
+	}
+}
+
+func TestHashAndSortAggregateAgree(t *testing.T) {
+	_, _, orders := Generate()
+	aggs := []AggSpec{{"count", -1}, {"sum", 3}, {"min", 4}, {"max", 4}, {"avg", 3}}
+	hash := Collect(&HashAggregate{Child: &Scan{T: orders}, GroupBy: []int{1}, Aggs: aggs})
+	sorted := Collect(&SortAggregate{Child: &Sort{Child: &Scan{T: orders}, Keys: []SortKey{{Col: 1}}}, GroupBy: []int{1}, Aggs: aggs})
+	equal(t, "hash vs sort agg", rowsAsStrings(hash, true), rowsAsStrings(sorted, true))
+}
+
+func TestAggregateSemantics(t *testing.T) {
+	// No GROUP BY over empty input: one row, count = 0, sum = NULL.
+	empty := &Table{Cols: []string{"x"}}
+	for _, op := range []Operator{
+		&HashAggregate{Child: &Scan{T: empty}, Aggs: []AggSpec{{"count", -1}, {"sum", 0}}},
+		&SortAggregate{Child: &Scan{T: empty}, Aggs: []AggSpec{{"count", -1}, {"sum", 0}}},
+	} {
+		rows := Collect(op)
+		if len(rows) != 1 || rows[0][0] != int64(0) || rows[0][1] != nil {
+			t.Fatalf("%T over empty = %v", op, rows)
+		}
+	}
+	// NULLs are skipped by sum/count(x) but counted by count(*); NULL forms its own group.
+	tbl := &Table{Cols: []string{"g", "v"}, Rows: []Row{{"a", int64(1)}, {"a", nil}, {nil, int64(5)}, {nil, int64(2)}}}
+	rows := Collect(&HashAggregate{Child: &Scan{T: tbl}, GroupBy: []int{0}, Aggs: []AggSpec{{"count", -1}, {"count", 1}, {"sum", 1}}})
+	got := rowsAsStrings(rows, false)
+	equal(t, "null handling", got, []string{"a | 2 | 1 | 1", "NULL | 2 | 2 | 7"})
+}
+
+func TestExternalSortMatchesSort(t *testing.T) {
+	_, _, orders := Generate()
+	keys := []SortKey{{Col: 4, Desc: true}, {Col: 3}}
+	want := rowsAsStrings(Collect(&Sort{Child: &Scan{T: orders}, Keys: keys}), false)
+	ext := &ExternalSort{Child: &Scan{T: orders}, Keys: keys, RunSize: 333}
+	got := rowsAsStrings(Collect(ext), false)
+	equal(t, "external sort", got, want) // identical order, so it's stable too
+	if ext.Runs != 16 {
+		t.Fatalf("runs = %d, want 16", ext.Runs)
+	}
+}
+
+func TestTopN(t *testing.T) {
+	_, _, orders := Generate()
+	keys := []SortKey{{Col: 3, Desc: true}, {Col: 4}}
+	all := rowsAsStrings(Collect(&Sort{Child: &Scan{T: orders}, Keys: keys}), false)
+	top := rowsAsStrings(Collect(&TopN{Child: &Scan{T: orders}, Keys: keys, N: 7}), false)
+	equal(t, "top-n", top, all[:7])
+}
+
+func TestNullsSortLast(t *testing.T) {
+	tbl := &Table{Cols: []string{"x"}, Rows: []Row{{nil}, {int64(2)}, {int64(1)}}}
+	for _, desc := range []bool{false, true} {
+		rows := Collect(&Sort{Child: &Scan{T: tbl}, Keys: []SortKey{{Col: 0, Desc: desc}}})
+		if rows[2][0] != nil {
+			t.Fatalf("desc=%v: NULL should be last, got %v", desc, rows)
+		}
+	}
+}

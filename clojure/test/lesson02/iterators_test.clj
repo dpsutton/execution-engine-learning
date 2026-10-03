@@ -1,0 +1,29 @@
+(ns lesson02.iterators-test
+  (:require [clojure.test :refer [deftest is]]
+            [lesson02.iterators :as it]))
+
+(deftest pipeline
+  (let [plan (-> (it/scan "customers" it/customers)
+                 (it/filter-op [:> [:col "age"] [:lit 30]])
+                 (it/project [[[:col "name"] "name"] [[:+ [:col "age"] [:lit 1]] "next_age"]]))]
+    (is (= ["name" "next_age"] (it/schema plan)))
+    (is (= [["Ada" 37] ["Cy" 53]] (it/run plan)))))
+
+(deftest filter-drops-null
+  (is (= 3 (count (it/run (it/filter-op (it/scan "customers" it/customers) [:is-not-null [:col "age"]])))))
+  (is (= ["Bo"] (map second (it/run (it/filter-op (it/scan "customers" it/customers) [:is-null [:col "age"]]))))))
+
+(deftest limit-stops-pulling
+  (let [pulled (atom 0)
+        src    (it/scan "customers" it/customers)
+        counting (reify it/Operator
+                   (open! [_] (it/open! src))
+                   (next! [_] (let [r (it/next! src)] (when r (swap! pulled inc)) r))
+                   (close! [_] (it/close! src))
+                   (schema [_] (it/schema src)))]
+    (is (= 2 (count (it/run (it/limit counting 2)))))
+    (is (= 2 @pulled))))
+
+(deftest reopen-restarts
+  (let [op (it/limit (it/scan "customers" it/customers) 3)]
+    (is (= (it/run op) (it/run op)))))

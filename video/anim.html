@@ -1,0 +1,887 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Execution Engine — trailer</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400;1,8..60,600&family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap">
+<style>
+  html, body { margin: 0; background: #000; }
+  #stage { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #0c0b11;
+    font-family: Inter, system-ui, sans-serif; color: #ece8e1; }
+  #bg, #root, #fg { position: absolute; inset: 0; }
+  #root { transform-origin: 50% 50%; }
+  .abs { position: absolute; left: 0; top: 0; will-change: transform, opacity; }
+  .serif { font-family: "Source Serif 4", Georgia, serif; }
+  .mono { font-family: "JetBrains Mono", Menlo, monospace; }
+  .chip { position: absolute; left: 96px; top: 76px; display: flex; align-items: center; gap: 14px;
+    font: 600 22px/1 Inter; letter-spacing: .14em; text-transform: uppercase; color: #a8a197; }
+  .chip i { width: 12px; height: 12px; border-radius: 50%; background: #ef8a5c; box-shadow: 0 0 18px #ef8a5c; }
+  .panel { position: absolute; background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.09);
+    border-radius: 22px; box-shadow: 0 30px 80px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.05); }
+  .node { position: absolute; padding: 14px 22px; border-radius: 14px; background: #17161e;
+    border: 1.5px solid rgba(255,255,255,.14); font: 600 24px/1.1 Inter; white-space: nowrap;
+    box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+  .node small { display: block; font: 400 17px/1.3 "JetBrains Mono"; color: #a8a197; margin-top: 6px; }
+  .pill { position: absolute; padding: 7px 14px; border-radius: 999px; font: 600 18px/1 "JetBrains Mono";
+    white-space: nowrap; color: #0c0b11; }
+  .kw { color: #ef8a5c; } .st { color: #a993f0; } .nm { color: #5cc2c0; } .dim { color: #6f695f; }
+  .big-num { font: 700 64px/1 "JetBrains Mono"; letter-spacing: -.02em; }
+  .label { font: 600 18px/1 Inter; letter-spacing: .12em; text-transform: uppercase; color: #a8a197; }
+  .cell { position: absolute; border-radius: 2px; }
+  .lst { font: 500 25px/40px "JetBrains Mono"; }
+  .lst .row { position: absolute; left: 0; right: 0; height: 40px; padding-left: 22px; white-space: pre; }
+  .reg { position: absolute; width: 110px; height: 70px; border-radius: 12px; background: rgba(255,255,255,.04);
+    border: 1px solid rgba(255,255,255,.1); text-align: center; }
+  .reg b { display: block; font: 600 15px/1 Inter; color: #6f695f; margin-top: 10px; letter-spacing: .08em; }
+  .reg span { display: block; font: 600 24px/1 "JetBrains Mono"; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div style="position:absolute;opacity:0;pointer-events:none"><span class="serif" style="font-weight:600">Aa</span><span class="serif"><i>Aa</i></span><span class="serif">Aa</span><span class="mono">Aa</span><span class="mono" style="font-weight:700">Aa</span><span style="font-weight:600">Aa</span><span style="font-weight:700">Aa</span></div>
+<div id="stage">
+  <canvas id="bg" width="1920" height="1080"></canvas>
+  <div id="root"></div>
+  <canvas id="fg" width="1920" height="1080"></canvas>
+</div>
+<script src="build/timeline.js"></script>
+<script>
+"use strict";
+// ============================================================================================
+// Deterministic motion graphics: renderAt(t) draws the frame at time t (seconds). No timers,
+// no CSS transitions — the capture script calls renderAt for every frame.
+// ============================================================================================
+const C = { ink: "#0c0b11", text: "#ece8e1", soft: "#a8a197", faint: "#6f695f", accent: "#ef8a5c",
+  teal: "#5cc2c0", violet: "#a993f0", good: "#7ccf7f", bad: "#f08a83", panel: "#17161e" };
+
+// ---------- math / easing ----------
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, u) => a + (b - a) * u;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const easeIO = (u) => (u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2);
+const easeOut = (u) => 1 - Math.pow(1 - u, 3);
+const easeIn = (u) => u * u * u;
+const easeExpo = (u) => (u >= 1 ? 1 : 1 - Math.pow(2, -10 * u));
+const back = (u) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(u - 1, 3) + c1 * Math.pow(u - 1, 2); };
+const fmtN = (n) => Math.round(n).toLocaleString("en-US");
+
+// ---------- DOM helpers ----------
+const root = document.getElementById("root");
+function h(tag, cls, parent, html) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (html != null) e.innerHTML = html;
+  (parent || root).appendChild(e);
+  return e;
+}
+const SVGNS = "http://www.w3.org/2000/svg";
+function s(tag, attrs, parent) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function svgLayer(parent) {
+  return s("svg", { width: 1920, height: 1080, viewBox: "0 0 1920 1080", style: "position:absolute;left:0;top:0;overflow:visible" }, parent || root);
+}
+// Position an element by its center.
+function at(e, x, y, o = {}) {
+  const sc = o.scale ?? 1, op = o.opacity ?? 1, blur = o.blur ?? 0, rot = o.rot ?? 0;
+  e.style.transform = `translate(${x}px, ${y}px) translate(-50%, -50%) scale(${sc}) rotate(${rot}deg)`;
+  e.style.opacity = op;
+  e.style.filter = blur > 0.05 ? `blur(${blur}px)` : "none";
+}
+// Fade-in-up helper: appear starting at time a over d seconds.
+function rise(e, x, y, t, a, d = 0.5, dist = 24, extra = {}) {
+  const u = easeOut(prog(t, a, a + d));
+  at(e, x, y + (1 - u) * dist, { opacity: u * (extra.opacity ?? 1), blur: (1 - u) * 8, scale: extra.scale ?? 1 });
+}
+function chip(text) { return h("div", "chip", root, `<i></i>${text}`); }
+function chipUpdate(e, t) { const u = easeOut(prog(t, 0.1, 0.6)); e.style.opacity = u; e.style.transform = `translateX(${(1 - u) * -20}px)`; }
+
+// Points along a polyline by fraction u (by length).
+function along(pts, u) {
+  let total = 0; const seg = [];
+  for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); seg.push(d); total += d; }
+  let target = clamp(u) * total;
+  for (let i = 0; i < seg.length; i++) {
+    if (target <= seg[i] || i === seg.length - 1) { const v = seg[i] ? target / seg[i] : 0; return [lerp(pts[i][0], pts[i + 1][0], clamp(v)), lerp(pts[i][1], pts[i + 1][1], clamp(v))]; }
+    target -= seg[i];
+  }
+  return pts[pts.length - 1];
+}
+
+// ---------- the dataset (DESIGN.md generator) ----------
+const DATA = (() => {
+  let state = 42n; const M = (1n << 64n) - 1n;
+  const next = () => { state = (state * 6364136223846793005n + 1442695040888963407n) & M; return Number(state >> 33n); };
+  const intn = (n) => next() % n;
+  const cities = ["Austin", "Boston", "Chicago", "Denver", "Miami", "Oakland", "Portland", "Seattle"];
+  const customers = [], orders = [];
+  for (let id = 1; id <= 200; id++) {
+    const r = intn(100);
+    const city = r < 40 ? cities[0] : r < 60 ? cities[1] : r < 72 ? cities[2] : cities[3 + intn(5)];
+    let age = 18 + intn(60); if (id % 17 === 0) age = null;
+    customers.push({ id, name: "cust" + id, city, age });
+  }
+  for (let id = 1; id <= 50; id++) { intn(5); intn(9900); }
+  for (let id = 1; id <= 5000; id++) {
+    const r = intn(100);
+    const customer_id = r < 50 ? 1 + intn(20) : 1 + intn(200);
+    intn(50); intn(5); intn(365);
+    orders.push({ id, customer_id });
+  }
+  return { customers, orders };
+})();
+
+// ---------- background ----------
+const bg = document.getElementById("bg").getContext("2d");
+const fg = document.getElementById("fg").getContext("2d");
+const grain = [];
+for (let k = 0; k < 6; k++) {
+  const c = document.createElement("canvas"); c.width = c.height = 256;
+  const g = c.getContext("2d"); const img = g.createImageData(256, 256);
+  let seed = 1234 + k * 977;
+  for (let i = 0; i < img.data.length; i += 4) { seed = (seed * 16807) % 2147483647; const v = seed & 255; img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255; }
+  g.putImageData(img, 0, 0); grain.push(c);
+}
+let BG = { tint: 0 }; // scenes may set BG.tint (0..1 desaturate/darken)
+function drawBg(t) {
+  bg.globalCompositeOperation = "source-over";
+  bg.fillStyle = C.ink; bg.fillRect(0, 0, 1920, 1080);
+  const blobs = [
+    [960 + Math.sin(t * 0.11) * 520, 380 + Math.cos(t * 0.09) * 200, 760, "239,138,92", 0.16],
+    [500 + Math.cos(t * 0.07 + 1) * 380, 800 + Math.sin(t * 0.1) * 160, 680, "92,194,192", 0.11],
+    [1500 + Math.sin(t * 0.08 + 2) * 300, 700 + Math.cos(t * 0.06) * 220, 720, "169,147,240", 0.12],
+  ];
+  for (const [x, y, r, col, a] of blobs) {
+    const g = bg.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, `rgba(${col},${a * (1 - BG.tint * 0.8)})`); g.addColorStop(1, `rgba(${col},0)`);
+    bg.fillStyle = g; bg.fillRect(0, 0, 1920, 1080);
+  }
+  // dot grid drifting slowly
+  bg.fillStyle = "rgba(255,255,255,0.05)";
+  const off = (t * 8) % 48;
+  for (let x = -48 + off; x < 1920; x += 48) for (let y = -48 + off * 0.5; y < 1080; y += 48) bg.fillRect(x, y, 2, 2);
+  // vignette
+  const v = bg.createRadialGradient(960, 540, 300, 960, 540, 1150);
+  v.addColorStop(0, "rgba(0,0,0,0)"); v.addColorStop(1, "rgba(0,0,0,0.7)");
+  bg.fillStyle = v; bg.fillRect(0, 0, 1920, 1080);
+}
+function drawFg(t, frame) {
+  fg.clearRect(0, 0, 1920, 1080);
+  fg.globalAlpha = 0.045; fg.globalCompositeOperation = "source-over";
+  const pat = fg.createPattern(grain[frame % grain.length], "repeat");
+  fg.fillStyle = pat; fg.fillRect(0, 0, 1920, 1080);
+  fg.globalAlpha = 1;
+}
+
+// ============================================================================================
+// Scenes. build(S) creates DOM once; update(st, t, S) sets every property for local time t.
+// S.p[i] = phrase i start (scene-relative), S.e[i] = phrase i end, S.dur = scene length.
+// ============================================================================================
+const SCENES = {};
+
+// ---------- shared: the query tree (hook + inside) ----------
+const TREE = {
+  agg:    { x: 1360, y: 230, title: "Aggregate", sub: "sum(o.qty) by c.name" },
+  filter: { x: 1360, y: 400, title: "Filter", sub: "c.city = 'Austin'" },
+  join:   { x: 1360, y: 570, title: "Join", sub: "o.customer_id = c.id" },
+  scanC:  { x: 1150, y: 760, title: "Scan", sub: "customers c" },
+  scanO:  { x: 1570, y: 760, title: "Scan", sub: "orders o" },
+};
+const TREE_EDGES = [["agg", "filter"], ["filter", "join"], ["join", "scanC"], ["join", "scanO"]];
+function buildTree(parent) {
+  const svg = svgLayer(parent);
+  const edges = TREE_EDGES.map(([a, b]) => {
+    const A = TREE[a], B = TREE[b];
+    const d = `M${A.x},${A.y + 40} C${A.x},${(A.y + B.y) / 2 + 10} ${B.x},${(A.y + B.y) / 2 - 10} ${B.x},${B.y - 40}`;
+    const p = s("path", { d, fill: "none", stroke: "rgba(255,255,255,.22)", "stroke-width": 2.5 }, svg);
+    const len = p.getTotalLength(); p.style.strokeDasharray = len; return { p, len };
+  });
+  const nodes = {};
+  for (const k in TREE) nodes[k] = h("div", "node abs", parent, `${TREE[k].title}<small>${TREE[k].sub}</small>`);
+  return { svg, edges, nodes };
+}
+function nodeGlow(e, g, color = C.accent) {
+  e.style.borderColor = g > 0.02 ? color : "rgba(255,255,255,.14)";
+  e.style.boxShadow = `0 10px 30px rgba(0,0,0,.4), 0 0 ${40 * g}px ${color}`;
+}
+
+// ---------- 1. hook: SQL types in, becomes a tree ----------
+SCENES.hook = {
+  fadeOut: false,
+  build(S) {
+    const lines = [
+      `<span class="kw">SELECT</span> c.name, <span class="nm">sum</span>(o.qty)`,
+      `<span class="kw">FROM</span> customers c`,
+      `<span class="kw">JOIN</span> orders o <span class="kw">ON</span> o.customer_id = c.id`,
+      `<span class="kw">WHERE</span> c.city = <span class="st">'Austin'</span>`,
+      `<span class="kw">GROUP BY</span> c.name`,
+    ];
+    const code = h("div", "abs mono", root); code.style.cssText += "font-size:40px;line-height:68px;left:150px;top:300px;transform:none";
+    const lineEls = lines.map((l) => { const d = h("div", "", code); d.dataset.html = l; d.dataset.text = d.innerHTML = l; d.innerHTML = ""; return d; });
+    const tree = buildTree(root);
+    return { code, lineEls, tree, lines };
+  },
+  update(st, t, S) {
+    const p0 = S.p[0];
+    // typing: total characters revealed over [0.15, p0 + 1.0]
+    const plain = st.lines.map((l) => l.replace(/<[^>]+>/g, ""));
+    const totalChars = plain.reduce((a, b) => a + b.length, 0);
+    let shown = Math.floor(totalChars * easeIO(prog(t, 0.15, p0 + 1.1)));
+    st.lineEls.forEach((el, i) => {
+      const n = Math.min(plain[i].length, Math.max(0, shown)); shown -= plain[i].length;
+      el.innerHTML = truncateHTML(st.lines[i], n) + (n > 0 && n < plain[i].length ? `<span style="color:${C.accent}">▍</span>` : "");
+    });
+    // code drifts left + dims as tree arrives; fades out at the very end
+    const m = easeIO(prog(t, p0 + 1.2, p0 + 2.0));
+    st.code.style.transform = `translate(${-m * 40}px, 0) scale(${1 - m * 0.12})`;
+    st.code.style.transformOrigin = "0 50%";
+    st.code.style.opacity = 1 - 0.45 * m - 0.55 * prog(t, S.dur - 0.5, S.dur);
+    // tree: nodes appear in parse order, linked to lines
+    const order = [["scanC", 1], ["scanO", 2], ["join", 2], ["filter", 3], ["agg", 0]];
+    const t0 = p0 + 1.05;
+    order.forEach(([k, line], i) => {
+      const a = t0 + i * 0.22, u = prog(t, a, a + 0.5);
+      const N = TREE[k]; at(st.tree.nodes[k], N.x, N.y, { opacity: easeOut(u), scale: 0.6 + 0.4 * back(u), blur: (1 - u) * 6 });
+      const g = Math.max(0, 1 - Math.abs(t - (a + 0.3)) / 0.5);
+      nodeGlow(st.tree.nodes[k], g * 0.9);
+      st.lineEls[line].style.color = g > 0.3 ? C.text : "";
+      st.lineEls[line].style.textShadow = g > 0.05 ? `0 0 ${24 * g}px rgba(239,138,92,.8)` : "none";
+    });
+    st.tree.edges.forEach(({ p, len }, i) => {
+      const a = t0 + 0.35 + (3 - i) * 0.2;
+      p.style.strokeDashoffset = len * (1 - easeIO(prog(t, a, a + 0.45)));
+    });
+  },
+};
+function truncateHTML(html, n) {
+  // reveal n visible characters of an html string with simple spans
+  let out = "", count = 0, i = 0;
+  while (i < html.length && count < n) {
+    if (html[i] === "<") { const j = html.indexOf(">", i); out += html.slice(i, j + 1); i = j + 1; continue; }
+    out += html[i++]; count++;
+  }
+  // close an open span
+  const opens = (out.match(/<span/g) || []).length, closes = (out.match(/<\/span>/g) || []).length;
+  return out + "</span>".repeat(Math.max(0, opens - closes));
+}
+
+// ---------- 2. inside: rows flow up through the tree, then we dive in ----------
+SCENES.inside = {
+  fadeIn: false,
+  build(S) {
+    const wrap = h("div", "abs", root); wrap.style.cssText = "position:absolute;inset:0;transform-origin:1360px 570px";
+    const tree = buildTree(wrap);
+    tree.edges.forEach(({ p }) => (p.style.strokeDashoffset = 0));
+    const resultTitle = h("div", "abs label", wrap, "result");
+    const result = h("div", "abs mono", wrap); result.style.cssText += "font-size:34px;line-height:56px";
+    const rows = ["Ada  │ 3", "Cy   │ 5"].map((r) => h("div", "", result, r));
+    // particles: label, color, path, start, dur, fail?
+    const P = [];
+    const pC = [[TREE.scanC.x, TREE.scanC.y - 40], [TREE.join.x - 60, TREE.join.y + 30]];
+    const pO = [[TREE.scanO.x, TREE.scanO.y - 40], [TREE.join.x + 60, TREE.join.y + 30]];
+    const pJF = [[TREE.join.x, TREE.join.y - 40], [TREE.filter.x, TREE.filter.y + 30]];
+    const pFA = [[TREE.filter.x, TREE.filter.y - 40], [TREE.agg.x, TREE.agg.y + 30]];
+    ["Ada", "Bo", "Cy", "Di"].forEach((n, i) => P.push({ label: n, color: C.teal, path: pC, a: 0.35 + i * 0.32, d: 0.55 }));
+    ["#10", "#11", "#12", "#13", "#14"].forEach((n, i) => P.push({ label: n, color: C.accent, path: pO, a: 0.45 + i * 0.28, d: 0.55 }));
+    [["Ada·#10", 0], ["Ada·#11", 0], ["Cy·#12", 0], ["Di·#13", 1]].forEach(([n, f], i) =>
+      P.push({ label: n, color: C.violet, path: pJF, a: 1.6 + i * 0.3, d: 0.5, fail: f }));
+    [["Ada·#10"], ["Ada·#11"], ["Cy·#12"]].forEach(([n], i) => P.push({ label: n, color: C.violet, path: pFA, a: 2.25 + i * 0.3, d: 0.45 }));
+    for (const q of P) q.el = h("div", "pill abs", wrap, q.label);
+    return { wrap, tree, P, rows, result, resultTitle };
+  },
+  update(st, t, S) {
+    const { tree, P } = st;
+    for (const k in TREE) { at(tree.nodes[k], TREE[k].x, TREE[k].y); nodeGlow(tree.nodes[k], 0); }
+    for (const q of P) {
+      const u = prog(t, q.a, q.a + q.d);
+      const [x, y] = along(q.path, easeIO(u));
+      let op = u > 0 && u < 1 ? 1 : 0, color = q.color, dy = 0;
+      if (q.fail && u >= 1) { const v = prog(t, q.a + q.d, q.a + q.d + 0.6); op = 1 - v; color = C.bad; dy = v * 60; }
+      q.el.style.background = color;
+      at(q.el, x, y + dy, { opacity: op * Math.min(1, u * 6), scale: q.fail && u >= 1 ? 1 - 0.3 * prog(t, q.a + q.d, q.a + q.d + 0.6) : 1 });
+      // glow node at arrival
+      if (u > 0.85 && u <= 1) {
+        const end = q.path[q.path.length - 1];
+        const key = Object.keys(TREE).find((k) => Math.abs(TREE[k].x - end[0]) < 80 && Math.abs(TREE[k].y - end[1]) < 80);
+        if (key) nodeGlow(tree.nodes[key], 0.8, q.fail && u >= 1 ? C.bad : q.color);
+      }
+    }
+    // aggregate emits results to the left
+    rise(st.resultTitle, 360, 330, t, 3.1, 0.5);
+    st.result.style.left = "0"; st.result.style.top = "0";
+    at(st.result, 360, 420, { opacity: 1 });
+    st.rows.forEach((r, i) => {
+      const u = easeOut(prog(t, 3.3 + i * 0.3, 3.8 + i * 0.3));
+      r.style.opacity = u; r.style.transform = `translateX(${(1 - u) * 160}px)`;
+      r.style.color = C.text;
+    });
+    if (t > 3.2 && t < 4.2) nodeGlow(tree.nodes.agg, 1 - prog(t, 3.6, 4.2), C.good);
+    // dive into the join: "most of us never look inside"
+    const z = easeIn(prog(t, S.p[1] + 0.5, S.dur));
+    st.wrap.style.transform = `scale(${1 + z * 5})`;
+    st.wrap.style.filter = z > 0.01 ? `blur(${z * 10}px)` : "none";
+    st.wrap.style.opacity = 1 - prog(t, S.dur - 0.45, S.dur);
+  },
+};
+
+// ---------- 3. title ----------
+SCENES.title = {
+  build(S) {
+    const kicker = h("div", "abs label", root, "Let's build one"); kicker.style.fontSize = "26px"; kicker.style.letterSpacing = ".3em"; kicker.style.color = C.accent;
+    const words = ["Building", "a", "query", "execution", "engine"].map((w) => { const e = h("div", "abs serif", root, w); e.style.cssText += "font-size:118px;font-weight:600;letter-spacing:-.02em"; return e; });
+    const sub = h("div", "abs", root, "from scratch &nbsp;·&nbsp; in seven parts"); sub.style.cssText += `font-size:34px;color:${C.soft}`;
+    const line = h("div", "abs", root); line.style.cssText += `height:4px;border-radius:2px;background:linear-gradient(90deg,${C.accent},${C.violet})`;
+    const parts = ["Expressions", "Iterators", "Joins", "Aggregation", "Indexes", "Planning", "Bytecode"];
+    const chips = parts.map((p, i) => h("div", "abs", root, `<span class="mono" style="color:${C.accent};font-weight:700">0${i + 1}</span>&nbsp; ${p}`));
+    chips.forEach((c) => (c.style.cssText += "font-size:24px;font-weight:500;padding:14px 22px;border-radius:14px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);white-space:nowrap"));
+    return { kicker, words, sub, line, chips };
+  },
+  update(st, t, S) {
+    const p0 = S.p[0], p1 = S.p[1];
+    const ku = easeOut(prog(t, p0 - 0.1, p0 + 0.5));
+    at(st.kicker, 960, 300 - (1 - ku) * 10, { opacity: ku, blur: (1 - ku) * 6 });
+    st.kicker.style.letterSpacing = `${0.3 + (1 - ku) * 0.3}em`;
+    // words laid out on one line: measure widths once
+    { const gap = 30; const ws = st.words.map((w) => w.getBoundingClientRect().width); const total = ws.reduce((a, b) => a + b, 0) + gap * (ws.length - 1); let x = 960 - total / 2; st.wx = ws.map((w) => { const c = x + w / 2; x += w + gap; return c; }); }
+    st.words.forEach((w, i) => {
+      const a = p1 - 0.15 + i * 0.11, u = easeOut(prog(t, a, a + 0.7));
+      at(w, st.wx[i], 450 + (1 - u) * 50, { opacity: u, blur: (1 - u) * 14 });
+      w.style.color = i === 3 ? C.accent : C.text;
+    });
+    rise(st.sub, 960, 570, t, p1 + 0.9, 0.6);
+    const lu = easeIO(prog(t, p1 + 0.5, p1 + 1.4));
+    st.line.style.width = `${lu * 560}px`; at(st.line, 960, 525, { opacity: lu > 0 ? 1 : 0 });
+    // chips: two rows (4 + 3)
+    st.chips.forEach((c, i) => {
+      const row = i < 4 ? 0 : 1, idx = row ? i - 4 : i, n = row ? 3 : 4;
+      const x = 960 + (idx - (n - 1) / 2) * 300, y = 720 + row * 92;
+      const a = p1 + 1.5 + i * 0.13, u = prog(t, a, a + 0.5);
+      at(c, x, y + (1 - easeOut(u)) * 30, { opacity: easeOut(u), scale: 0.85 + 0.15 * back(u) });
+    });
+  },
+};
+
+// ---------- 4. pull: expression evaluation + iterator pull protocol ----------
+SCENES.pull = {
+  build(S) {
+    const c = chip("Parts 1 – 2 · Expressions & iterators");
+    const left = h("div", "panel", root); left.style.cssText += "left:90px;top:170px;width:820px;height:800px";
+    const right = h("div", "panel", root); right.style.cssText += "left:1010px;top:170px;width:820px;height:800px";
+    const rowCard = h("div", "abs mono", root, `row: <span class="nm">city</span>=<span class="st">'Austin'</span>  <span class="nm">qty</span>=5`);
+    rowCard.style.cssText += `font-size:26px;padding:14px 24px;border-radius:12px;background:rgba(92,194,192,.12);border:1px solid ${C.teal}`;
+    // expression tree: qty * 2 > 4 AND city = 'Austin'
+    const E = {
+      and: { x: 500, y: 340, t: "AND", v: "true" },
+      gt: { x: 330, y: 480, t: ">", v: "true" }, eq: { x: 690, y: 480, t: "=", v: "true" },
+      mul: { x: 230, y: 620, t: "*", v: "10" }, four: { x: 430, y: 620, t: "4", v: "4" },
+      city: { x: 610, y: 620, t: "city", v: "'Austin'" }, aus: { x: 790, y: 620, t: "'Austin'", v: "'Austin'" },
+      qty: { x: 160, y: 760, t: "qty", v: "5" }, two: { x: 300, y: 760, t: "2", v: "2" },
+    };
+    const EE = [["and", "gt"], ["and", "eq"], ["gt", "mul"], ["gt", "four"], ["eq", "city"], ["eq", "aus"], ["mul", "qty"], ["mul", "two"]];
+    const svg = svgLayer();
+    for (const [a, b] of EE) s("line", { x1: E[a].x, y1: E[a].y, x2: E[b].x, y2: E[b].y, stroke: "rgba(255,255,255,.18)", "stroke-width": 2 }, svg);
+    for (const k in E) {
+      E[k].el = h("div", "abs mono", root, E[k].t);
+      E[k].el.style.cssText += "font-size:26px;font-weight:600;min-width:64px;text-align:center;padding:12px 16px;border-radius:14px;background:#17161e;border:1.5px solid rgba(255,255,255,.16)";
+      E[k].badge = h("div", "abs mono", root, E[k].v);
+      E[k].badge.style.cssText += `font-size:20px;font-weight:700;padding:5px 11px;border-radius:999px;background:${C.accent};color:${C.ink}`;
+    }
+    const evalOrder = ["qty", "two", "mul", "four", "gt", "city", "aus", "eq", "and"];
+    // iterator pipeline
+    const OPS = [{ k: "limit", t: "Limit 2", y: 330 }, { k: "proj", t: "Project name", y: 480 }, { k: "filter", t: "Filter city='Austin'", y: 630 }, { k: "scan", t: "Scan customers", y: 780 }];
+    for (const o of OPS) o.el = h("div", "node abs", root, o.t);
+    const svg2 = svgLayer();
+    for (let i = 0; i < 3; i++) s("line", { x1: 1420, y1: OPS[i].y + 34, x2: 1420, y2: OPS[i + 1].y - 34, stroke: "rgba(255,255,255,.18)", "stroke-width": 2 }, svg2);
+    const outTitle = h("div", "abs label", root, "output");
+    const outs = ["Ada", "Cy"].map((n) => { const e = h("div", "pill abs", root, n); e.style.background = C.good; return e; });
+    const scanStat = h("div", "abs mono", root, ""); scanStat.style.cssText += `font-size:22px;color:${C.soft}`;
+    const limitBadge = h("div", "abs mono", root, "2/2 · stop"); limitBadge.style.cssText += `font-size:20px;font-weight:700;padding:6px 12px;border-radius:999px;background:${C.good};color:${C.ink}`;
+    // events: pull protocol choreography (relative to p1)
+    const ev = []; let tt = 0; const hop = 0.17;
+    const call = (from, to) => { for (let i = from; i < to; i++) { ev.push({ type: "call", i, a: tt, d: hop }); tt += hop; } };
+    const row = (label, from, to, fail) => { for (let i = from; i > to; i--) { ev.push({ type: "row", i, label, a: tt, d: hop, fail: fail && i - 1 === 2 }); tt += hop; if (fail && i - 1 === 2) { tt += 0.15; return; } } };
+    call(0, 3); row("Ada", 3, 0); ev.push({ type: "out", n: 0, a: tt }); tt += 0.1;
+    call(0, 3); row("Bo", 3, 2, true); call(2, 3); row("Cy", 3, 0); ev.push({ type: "out", n: 1, a: tt }); tt += 0.1;
+    ev.push({ type: "stop", a: tt });
+    const movers = ev.filter((e) => e.type !== "out" && e.type !== "stop").map((e) => {
+      const el = h("div", "abs", root, e.type === "call" ? "next()" : e.label);
+      el.style.cssText += e.type === "call"
+        ? `font:600 18px/1 'JetBrains Mono';color:${C.accent}` : `font:600 18px/1 'JetBrains Mono';padding:6px 12px;border-radius:999px;color:${C.ink}`;
+      return { e, el };
+    });
+    return { c, left, right, rowCard, E, evalOrder, OPS, outs, outTitle, scanStat, limitBadge, ev, movers };
+  },
+  update(st, t, S) {
+    chipUpdate(st.c, t);
+    const p0 = S.p[0], p1 = S.p[1];
+    rise(st.rowCard, 500, 235, t, p0 + 0.2, 0.5);
+    for (const k in st.E) { const n = st.E[k]; const u = prog(t, 0.15, 0.7); at(n.el, n.x, n.y, { opacity: easeOut(u) }); n.el.style.borderColor = "rgba(255,255,255,.16)"; n.el.style.boxShadow = "none"; }
+    st.evalOrder.forEach((k, i) => {
+      const n = st.E[k], a = p0 + 0.7 + i * 0.25, u = prog(t, a, a + 0.35);
+      at(n.badge, n.x + 46, n.y - 34, { opacity: easeOut(u), scale: 0.5 + 0.5 * back(u) });
+      const g = Math.max(0, 1 - Math.abs(t - a - 0.15) / 0.35);
+      if (g > 0) { n.el.style.borderColor = C.accent; n.el.style.boxShadow = `0 0 ${30 * g}px ${C.accent}`; }
+      if (k === "and" && t > a + 0.3) { n.el.style.borderColor = C.good; n.el.style.boxShadow = `0 0 ${24 + 10 * Math.sin(t * 6)}px ${C.good}`; n.badge.style.background = C.good; }
+    });
+    // pipeline
+    st.OPS.forEach((o, i) => { at(o.el, 1420, o.y, { opacity: easeOut(prog(t, 0.3 + i * 0.08, 0.8 + i * 0.08)) }); nodeGlow(o.el, 0); });
+    const T1 = t - (p1 - 0.1);
+    for (const m of st.movers) {
+      const e = m.e, u = prog(T1, e.a, e.a + e.d);
+      if (e.type === "call") {
+        const y0 = st.OPS[e.i].y + 30, y1 = st.OPS[e.i + 1].y - 30;
+        at(m.el, 1300, lerp(y0, y1, easeIO(u)), { opacity: u > 0 && u < 1 ? 1 : 0 });
+        if (u > 0.7 && u < 1) nodeGlow(st.OPS[e.i + 1].el, 0.8, C.accent);
+      } else {
+        const y0 = st.OPS[e.i].y - 30, y1 = st.OPS[e.i - 1].y + 30;
+        let op = u > 0 && u < 1 ? 1 : 0, col = C.teal, dy = 0;
+        if (e.fail && u >= 1) { const v = prog(T1, e.a + e.d, e.a + e.d + 0.5); op = 1 - v; col = C.bad; dy = v * 40; }
+        if (e.fail && u >= 1 && T1 > e.a + e.d + 0.5) op = 0;
+        m.el.style.background = col;
+        const y = e.fail && u >= 1 ? y1 + dy : lerp(y0, y1, easeIO(u));
+        at(m.el, 1540, y, { opacity: op });
+        if (u > 0.7 && u < 1) nodeGlow(st.OPS[e.i - 1].el, 0.8, C.teal);
+        if (e.fail && u >= 1 && op > 0) nodeGlow(st.OPS[2].el, op, C.bad);
+      }
+    }
+    const outs = st.ev.filter((e) => e.type === "out");
+    rise(st.outTitle, 1700, 230, t, p1, 0.4);
+    st.outs.forEach((o, i) => { const a = outs[i].a, u = prog(T1, a, a + 0.35); at(o, 1700 - (1 - easeOut(u)) * 80, 280 + i * 50, { opacity: easeOut(u) }); });
+    const stop = st.ev.find((e) => e.type === "stop");
+    const su = prog(T1, stop.a, stop.a + 0.4);
+    at(st.limitBadge, 1610, 330, { opacity: easeOut(su), scale: 0.6 + 0.4 * back(su) });
+    // rows read counter
+    const reads = st.ev.filter((e) => e.type === "row" && e.i === 3 && T1 >= e.a).length;
+    st.scanStat.innerHTML = `rows read: <b style="color:${C.text}">${reads}</b> of 4${su > 0.5 ? `  <span style="color:${C.good}">· never touched Di</span>` : ""}`;
+    at(st.scanStat, 1420, 870, { opacity: easeOut(prog(t, p1, p1 + 0.4)) });
+  },
+};
+
+// ---------- 5. joins: a million vs five thousand ----------
+SCENES.joins = {
+  build(S) {
+    const c = chip("Part 3 · Joins");
+    const tc = h("div", "abs", root, `<span class="mono" style="color:${C.teal};font-weight:700">customers</span><div class="big-num">200</div>`);
+    const to = h("div", "abs", root, `<span class="mono" style="color:${C.accent};font-weight:700">orders</span><div class="big-num">5,000</div>`);
+    const bow = h("div", "abs serif", root, "⋈"); bow.style.cssText += `font-size:92px;color:${C.soft}`;
+    [tc, to].forEach((e) => (e.style.cssText += "text-align:center"));
+    // nested loop grid: 50 x 20 cells = 1000 cells x 1000 comparisons
+    const nlPanel = h("div", "panel", root); nlPanel.style.cssText += "left:110px;top:400px;width:820px;height:540px";
+    const nlTitle = h("div", "abs label", root, "nested loop");
+    const cells = [];
+    for (let r = 0; r < 20; r++) for (let q = 0; q < 50; q++) { const e = h("div", "cell", root); e.style.cssText += `width:12px;height:12px;left:${170 + q * 14.2}px;top:${500 + r * 15}px;background:rgba(255,255,255,.06)`; cells.push(e); }
+    const nlCount = h("div", "abs big-num", root, "0");
+    const hjPanel = h("div", "panel", root); hjPanel.style.cssText += "left:990px;top:400px;width:820px;height:540px";
+    const hjTitle = h("div", "abs label", root, "hash join");
+    const buckets = []; for (let b = 0; b < 16; b++) { const e = h("div", "cell", root); e.style.cssText += `width:34px;left:${1060 + b * 44}px;border-radius:6px 6px 2px 2px;background:${C.teal}`; buckets.push(e); }
+    const bucketCounts = new Array(16).fill(0); DATA.customers.forEach((c) => bucketCounts[(c.id * 7) % 16]++);
+    const probes = []; for (let i = 0; i < 14; i++) { const e = h("div", "cell", root); e.style.cssText += `width:10px;height:10px;border-radius:50%;background:${C.accent}`; probes.push(e); }
+    const hjCount = h("div", "abs big-num", root, "0");
+    const bars = h("div", "abs", root); bars.style.cssText += "width:1700px";
+    const barNL = h("div", "", bars); const barHJ = h("div", "", bars);
+    const ratio = h("div", "abs serif", root, `<i>~190× less work</i>`); ratio.style.cssText += `font-size:60px;font-weight:600;color:${C.text}`;
+    return { c, tc, to, bow, nlPanel, nlTitle, cells, nlCount, hjPanel, hjTitle, buckets, bucketCounts, probes, hjCount, ratio };
+  },
+  update(st, t, S) {
+    chipUpdate(st.c, t);
+    const [p0, p1, p2, p3] = S.p;
+    rise(st.tc, 760, 250, t, p0 + 0.2, 0.6); rise(st.to, 1160, 250, t, p0 + 1.3, 0.6);
+    rise(st.bow, 960, 250, t, p0 + 0.8, 0.5);
+    // panels appear with nested loop phrase
+    const pu = easeOut(prog(t, p1 - 0.3, p1 + 0.3));
+    st.nlPanel.style.opacity = pu; st.nlPanel.style.transform = `translateY(${(1 - pu) * 30}px)`;
+    rise(st.nlTitle, 520, 450, t, p1 - 0.2, 0.4);
+    const nlU = easeIO(prog(t, p1 + 0.2, p2 - 0.3));
+    const lit = Math.floor(nlU * st.cells.length);
+    st.cells.forEach((e, i) => {
+      e.style.opacity = pu;
+      const age = (lit - i);
+      e.style.background = i < lit ? (age < 40 ? C.bad : "rgba(240,138,131,.35)") : "rgba(255,255,255,.06)";
+    });
+    st.nlCount.textContent = fmtN(nlU * 1e6); st.nlCount.style.color = C.bad;
+    at(st.nlCount, 520, 870, { opacity: pu });
+    // hash join
+    const hu = easeOut(prog(t, p2 - 0.3, p2 + 0.3));
+    st.hjPanel.style.opacity = hu; st.hjPanel.style.transform = `translateY(${(1 - hu) * 30}px)`;
+    rise(st.hjTitle, 1400, 450, t, p2 - 0.2, 0.4);
+    const bu = easeOut(prog(t, p2 + 0.1, p3 + 0.2));
+    st.buckets.forEach((e, b) => {
+      const ht = st.bucketCounts[b] * 9 * clamp(bu * 1.6 - b * 0.03);
+      e.style.height = `${ht}px`; e.style.top = `${760 - ht}px`; e.style.opacity = hu;
+    });
+    const probeU = prog(t, p3 - 0.1, p3 + 1.3);
+    st.probes.forEach((e, i) => {
+      const u = clamp(probeU * 2.2 - i * 0.09);
+      const b = (i * 5) % 16; const x0 = 1080 + i * 50, x1 = 1077 + b * 44;
+      const op = u > 0 && u < 1 ? 1 : 0;
+      at(e, lerp(x0, x1, u), lerp(520, 700, easeIn(u)), { opacity: op * hu });
+    });
+    const hjN = easeOut(prog(t, p3 - 0.05, p3 + 1.2)) * 5200;
+    st.hjCount.textContent = fmtN(hjN); st.hjCount.style.color = C.teal;
+    at(st.hjCount, 1400, 870, { opacity: hu });
+    // finale: ratio
+    const fu = easeOut(prog(t, p3 + 1.4, p3 + 2.0));
+    at(st.ratio, 960, 1000, { opacity: fu, blur: (1 - fu) * 10 });
+  },
+};
+
+// ---------- 6. indexes: scan 5,000 rows vs two pages ----------
+SCENES.indexes = {
+  build(S) {
+    const c = chip("Part 5 · Indexes");
+    const gridTitle = h("div", "abs label", root, "orders · where customer_id = 7");
+    const cells = []; const COLS = 100;
+    DATA.orders.forEach((o, i) => { const q = i % COLS, r = Math.floor(i / COLS); const e = h("div", "cell", root); e.style.cssText += `width:6px;height:9px;left:${110 + q * 7.4}px;top:${300 + r * 12}px`; cells.push({ e, hit: o.customer_id === 7, x: 113 + q * 7.4, y: 304 + r * 12 }); });
+    const scanCount = h("div", "abs mono", root); scanCount.style.cssText += "font-size:28px";
+    const sweep = h("div", "abs", root); sweep.style.cssText += `width:760px;height:3px;background:${C.accent};box-shadow:0 0 18px ${C.accent}`;
+    // B+tree: root + 12 leaves (+ellipsis)
+    const svg = svgLayer();
+    const rootN = h("div", "node abs", root, `<span class="mono" style="font-size:20px">[ 7 · 14 · 22 · 41 · … ]</span>`);
+    const leaves = []; const LX = (i) => 1000 + i * 70;
+    for (let i = 0; i < 12; i++) { const e = h("div", "abs", root); e.style.cssText += "width:58px;height:40px;border-radius:9px;background:#17161e;border:1.5px solid rgba(255,255,255,.16)"; leaves.push(e); }
+    const edges = leaves.map((_, i) => s("path", { d: `M1420,520 C1420,600 ${LX(i) + 29},600 ${LX(i) + 29},660`, fill: "none", stroke: "rgba(255,255,255,.16)", "stroke-width": 2 }, svg));
+    const links = s("path", { d: `M1029,700 L${LX(11) + 29},700`, stroke: "rgba(255,255,255,.12)", "stroke-width": 2, "stroke-dasharray": "4 6" }, svg);
+    const treeTitle = h("div", "abs label", root, "B+tree on orders.customer_id");
+    const rays = s("g", {}, svg);
+    const hits = cells.filter((c) => c.hit);
+    const rayEls = hits.map((c) => s("line", { x1: LX(1) + 29, y1: 720, x2: c.x, y2: c.y, stroke: C.violet, "stroke-width": 1, opacity: 0 }, rays));
+    const pages = h("div", "abs", root); pages.style.cssText += "text-align:center";
+    return { c, gridTitle, cells, scanCount, sweep, rootN, leaves, LX, edges, links, treeTitle, rayEls, hits, pages, svg };
+  },
+  update(st, t, S) {
+    chipUpdate(st.c, t);
+    const [p0, p1, p2] = S.p;
+    // tree builds with "Add a B-plus tree"
+    rise(st.treeTitle, 1420, 300, t, p0 - 0.2, 0.5);
+    const ru = prog(t, p0, p0 + 0.5); at(st.rootN, 1420, 480, { opacity: easeOut(ru), scale: 0.7 + 0.3 * back(ru) });
+    st.leaves.forEach((e, i) => { const u = prog(t, p0 + 0.3 + i * 0.05, p0 + 0.7 + i * 0.05); at(e, st.LX(i) + 29, 700, { opacity: easeOut(u), scale: 0.6 + 0.4 * back(u) }); });
+    st.edges.forEach((e, i) => e.setAttribute("opacity", easeOut(prog(t, p0 + 0.3 + i * 0.05, p0 + 0.8 + i * 0.05))));
+    st.links.setAttribute("opacity", easeOut(prog(t, p0 + 0.9, p0 + 1.3)));
+    // full scan sweep
+    rise(st.gridTitle, 480, 250, t, 0.2, 0.5);
+    const su = prog(t, p1 + 0.4, p2 - 0.1);
+    const scanned = Math.floor(easeIO(su) * 5000);
+    const fadeIn = easeOut(prog(t, 0.1, 0.8));
+    st.cells.forEach((c, i) => {
+      let col = "rgba(255,255,255,.07)";
+      if (i < scanned) col = c.hit ? C.accent : (scanned - i < 300 ? "rgba(239,138,92,.35)" : "rgba(255,255,255,.14)");
+      if (c.hit && t > p2) col = C.violet;
+      c.e.style.background = col; c.e.style.opacity = fadeIn;
+    });
+    const row = Math.floor(scanned / 100);
+    at(st.sweep, 480, 300 + row * 12, { opacity: su > 0 && su < 1 ? 1 : 0 });
+    st.scanCount.innerHTML = `full scan: <b style="color:${C.bad}">${fmtN(scanned)}</b> rows read`;
+    at(st.scanCount, 480, 960, { opacity: easeOut(prog(t, p1 + 0.2, p1 + 0.6)) });
+    // index lookup: root → leaf, then fan out to the 126 rows
+    const g1 = prog(t, p2 - 0.1, p2 + 0.3), g2 = prog(t, p2 + 0.35, p2 + 0.7);
+    nodeGlow(st.rootN, g1 > 0 ? 1 : 0, C.violet);
+    st.leaves.forEach((e, i) => { const on = i === 1 && g2 > 0; e.style.borderColor = on ? C.violet : "rgba(255,255,255,.16)"; e.style.boxShadow = on ? `0 0 30px ${C.violet}` : "none"; e.style.background = on ? "rgba(169,147,240,.25)" : "#17161e"; });
+    st.edges.forEach((e, i) => { e.setAttribute("stroke", i === 1 && g1 > 0.5 ? C.violet : "rgba(255,255,255,.16)"); e.setAttribute("stroke-width", i === 1 && g1 > 0.5 ? 4 : 2); });
+    const fan = prog(t, p2 + 0.7, p2 + 1.6);
+    st.rayEls.forEach((r, i) => r.setAttribute("opacity", fan > i / st.rayEls.length ? 0.35 * (1 - prog(t, p2 + 2.0, S.dur)) + 0.1 : 0));
+    const pu = easeOut(prog(t, p2 + 0.3, p2 + 0.8));
+    st.pages.innerHTML = `<div class="label">index lookup</div><div class="big-num" style="color:${C.violet};margin-top:14px">2 pages</div><div class="mono" style="font-size:22px;color:${C.soft};margin-top:10px">+ 126 matching rows</div>`;
+    at(st.pages, 1420, 880, { opacity: pu, scale: 0.9 + 0.1 * back(pu) });
+  },
+};
+
+// ---------- 7. planner: guessing, and guessing wrong ----------
+SCENES.planner = {
+  build(S) {
+    const c = chip("Part 6 · Statistics & planning");
+    const q = h("div", "abs mono", root, `<span class="kw">WHERE</span> c.city = <span class="st">'Austin'</span>`); q.style.cssText += "font-size:40px";
+    const guess = h("div", "abs", root); guess.style.cssText += "text-align:center";
+    // three panels
+    const P = ["Histograms", "Selectivity", "Join order"].map((tt, i) => { const e = h("div", "panel", root); e.style.cssText += `width:520px;height:400px;left:${110 + i * 580}px;top:360px`; const ti = h("div", "abs serif", root, tt); ti.style.cssText += "font-size:44px;font-weight:600"; return { e, ti }; });
+    // equi-depth histogram of orders.customer_id
+    const ids = DATA.orders.map((o) => o.customer_id).sort((a, b) => a - b);
+    const B = []; for (let b = 0; b < 8; b++) { const lo = ids[Math.floor((b * ids.length) / 8)], hi = ids[Math.floor(((b + 1) * ids.length) / 8) - 1]; B.push([lo, hi]); }
+    const bars = B.map(([lo, hi]) => { const e = h("div", "cell", root); e.style.cssText += `background:linear-gradient(${C.accent},rgba(239,138,92,.4));border-radius:6px 6px 0 0`; return { e, lo, hi }; });
+    const histLabel = h("div", "abs mono", root, "orders.customer_id · equi-depth"); histLabel.style.cssText += `font-size:17px;color:${C.soft}`;
+    const sel = h("div", "abs", root, `<div class="mono" style="font-size:30px;color:${C.soft}">sel(city = k)</div><div class="mono" style="font-size:64px;font-weight:700;margin-top:18px">1 / ndv</div><div class="mono" style="font-size:30px;color:${C.soft};margin-top:18px">= 1/8 → <span style="color:${C.text}">25 rows</span></div>`);
+    sel.style.cssText += "text-align:center";
+    // join order lattice
+    const svg = svgLayer();
+    const L = { c: [1385, 715], o: [1530, 715], p: [1675, 715], co: [1435, 615], op: [1625, 615], cp: [1530, 615], cop: [1530, 515] };
+    const LE = [["c", "co"], ["o", "co"], ["o", "op"], ["p", "op"], ["c", "cp"], ["p", "cp"], ["co", "cop"], ["op", "cop"], ["cp", "cop"]];
+    const lEdges = LE.map(([a, b]) => ({ a, b, el: s("line", { x1: L[a][0], y1: L[a][1], x2: L[b][0], y2: L[b][1], stroke: "rgba(255,255,255,.18)", "stroke-width": 2 }, svg) }));
+    const lNodes = {}; for (const k in L) { const e = h("div", "abs mono", root, `{${k.split("").join(",")}}`); e.style.cssText += "font-size:20px;font-weight:600;padding:8px 12px;border-radius:10px;background:#17161e;border:1.5px solid rgba(255,255,255,.16)"; lNodes[k] = e; }
+    // finale comparison
+    const fin = h("div", "abs", root); fin.style.cssText += "width:1100px";
+    fin.innerHTML = `<div style="display:flex;align-items:center;gap:24px;margin-bottom:26px"><span class="label" style="width:150px">estimate</span><div id="bE" style="height:54px;border-radius:8px;background:${C.teal}"></div><span id="nE" class="mono" style="font-size:40px;font-weight:700"></span></div>
+      <div style="display:flex;align-items:center;gap:24px"><span class="label" style="width:150px">actual</span><div id="bA" style="height:54px;border-radius:8px;background:${C.bad}"></div><span id="nA" class="mono" style="font-size:40px;font-weight:700"></span></div>`;
+    const off = h("div", "abs serif", root, `<i>3.1× off.</i>`); off.style.cssText += `font-size:84px;font-weight:600;color:${C.bad}`;
+    const why = h("div", "abs mono", root, "40% of customers live in Austin. The uniformity assumption didn't know."); why.style.cssText += `font-size:24px;color:${C.soft}`;
+    return { c, q, guess, P, bars, histLabel, sel, L, lEdges, lNodes, fin, off, why, svg };
+  },
+  update(st, t, S) {
+    chipUpdate(st.c, t);
+    const [p0, p1, p2] = S.p;
+    const out1 = easeIO(prog(t, p1 - 0.4, p1)); // query+guess move up
+    const back2 = easeIO(prog(t, p2 - 0.2, p2 + 0.4));
+    rise(st.q, 960, 330 - out1 * 120 + back2 * 220, t, p0, 0.5, 24, { opacity: 1 - 0.6 * out1 + 0.6 * back2 });
+    // guessing digits scramble
+    const g = prog(t, p0 + 0.6, p1 - 0.3);
+    const scr = g > 0 && g < 1 ? String(17 + Math.floor((Math.sin(t * 37) * 0.5 + 0.5) * 80)) : "?";
+    st.guess.innerHTML = `<div class="label">rows ≈</div><div class="big-num" style="font-size:120px;color:${C.accent};margin-top:12px">${scr}</div>`;
+    at(st.guess, 960, 560, { opacity: easeOut(prog(t, p0 + 0.3, p0 + 0.8)) * (1 - out1) });
+    // three panels at word times
+    const fin = prog(t, p2 - 0.2, p2 + 0.4);
+    st.P.forEach(({ e, ti }, i) => {
+      const a = p1 + i * 0.85, u = easeOut(prog(t, a - 0.1, a + 0.45));
+      const shrink = easeIO(fin);
+      e.style.opacity = u * (1 - shrink); e.style.transform = `translateY(${(1 - u) * 40 - shrink * 60}px) scale(${1 - shrink * 0.1})`;
+      at(ti, 370 + i * 580, 420 + (1 - u) * 40 - shrink * 60, { opacity: u * (1 - shrink), scale: 1 - shrink * 0.1 });
+    });
+    const panelOp = (i) => easeOut(prog(t, p1 + i * 0.85 - 0.1, p1 + i * 0.85 + 0.45)) * (1 - easeIO(fin));
+    // histogram bars: width ∝ id range, height ∝ density
+    const x0 = 160, W = 420, base = 720;
+    st.bars.forEach((b, i) => {
+      const lo = (b.lo - 1) / 200, hi = b.hi / 200; const w = Math.max(4, (hi - lo) * W);
+      const dens = 1 / Math.max(0.005, hi - lo); const hh = Math.min(230, Math.sqrt(dens) * 21) * easeOut(prog(t, p1 + 0.1 + i * 0.05, p1 + 0.7 + i * 0.05));
+      b.e.style.left = `${x0 + lo * W}px`; b.e.style.width = `${w - 2}px`; b.e.style.top = `${base - hh}px`; b.e.style.height = `${hh}px`; b.e.style.opacity = panelOp(0);
+    });
+    at(st.histLabel, 370, 740, { opacity: panelOp(0) });
+    at(st.sel, 960, 590, { opacity: panelOp(1) });
+    // lattice: best path c → co → cop lights up
+    const lu = panelOp(2);
+    for (const k in st.lNodes) { at(st.lNodes[k], st.L[k][0], st.L[k][1], { opacity: lu * (k === "cp" ? 0.35 : 1) }); }
+    const best = prog(t, p1 + 2.0, p1 + 2.6);
+    ["c", "o", "co", "op", "p", "cop"].forEach((k) => { const on = best > 0 && (k === "co" || k === "cop" || k === "c" || k === "o" || k === "p"); st.lNodes[k].style.borderColor = on && (k === "co" || k === "cop") ? C.good : "rgba(255,255,255,.16)"; });
+    st.lEdges.forEach(({ a, b, el }) => { const on = best > 0.5 && ((a === "co" && b === "cop") || (b === "co")); el.setAttribute("stroke", on ? C.good : "rgba(255,255,255,.18)"); el.setAttribute("opacity", lu); });
+    // finale: estimate vs actual
+    const fu = easeOut(prog(t, p2 + 0.2, p2 + 0.7));
+    at(st.fin, 960, 720, { opacity: fu });
+    const eU = easeOut(prog(t, p2 + 0.4, p2 + 1.0)), aU = easeOut(prog(t, p2 + 0.9, p2 + 1.9));
+    const bE = st.fin.querySelector("#bE"), bA = st.fin.querySelector("#bA");
+    bE.style.width = `${eU * 25 * 9}px`; bA.style.width = `${aU * 78 * 9}px`;
+    st.fin.querySelector("#nE").textContent = Math.round(eU * 25);
+    st.fin.querySelector("#nA").textContent = Math.round(aU * 78);
+    const ou = prog(t, p2 + 1.9, p2 + 2.3);
+    at(st.off, 960, 920, { opacity: easeOut(ou), scale: 0.8 + 0.2 * back(ou), blur: (1 - ou) * 6 });
+    rise(st.why, 960, 1010, t, p2 + 2.4, 0.5);
+  },
+};
+
+// ---------- 8. bytecode: run, pause, save, resume elsewhere ----------
+function vmTrace() {
+  // A real tiny VM run over the generated customers: SELECT name FROM customers WHERE age > 40
+  const prog = [
+    ["Init", 0, 10, "", ""], ["OpenScan", 0, "", "", "customers"], ["Rewind", 0, 9, "", ""],
+    ["Column", 0, 3, 1, "r1 = age"], ["Gt", 1, 2, 3, "r3 = r1 > r2"], ["IfNot", 3, 8, "", ""],
+    ["Column", 0, 1, 4, "r4 = name"], ["ResultRow", 4, 1, "", "yield row"], ["Next", 0, 3, "", ""],
+    ["Halt", "", "", "", ""], ["Const", 2, 40, "", "r2 = 40"], ["Goto", 0, 1, "", ""],
+  ];
+  const rows = DATA.customers;
+  const states = []; let pc = 0, regs = [null, null, null, null, null], cur = -1, out = [];
+  for (let step = 0; step < 400; step++) {
+    states.push({ pc, regs: regs.slice(), cur, out: out.slice() });
+    const [op, a, b, c] = prog[pc];
+    if (op === "Halt") break;
+    switch (op) {
+      case "Init": pc = b; continue;
+      case "Const": regs[a] = b; pc++; continue;
+      case "Goto": pc = b; continue;
+      case "OpenScan": cur = -1; pc++; continue;
+      case "Rewind": cur = 0; pc++; continue;
+      case "Column": regs[c] = b === 3 ? rows[cur].age : rows[cur].name; pc++; continue;
+      case "Gt": regs[c] = regs[a] == null ? null : regs[a] > regs[b]; pc++; continue;
+      case "IfNot": pc = regs[a] === true ? pc + 1 : b; continue;
+      case "ResultRow": out.push(regs[a] + " · " + rows[cur].age); pc++; continue;
+      case "Next": cur++; pc = cur < rows.length ? b : pc + 1; continue;
+    }
+  }
+  return { prog, states };
+}
+SCENES.bytecode = {
+  build(S) {
+    const c = chip("Part 7 · Bytecode");
+    const { prog, states } = vmTrace();
+    const mk = (title) => {
+      const frame = h("div", "panel", root); frame.style.cssText += "width:800px;height:820px;left:0;top:0";
+      const ttl = h("div", "label", frame, title); ttl.style.cssText += "position:absolute;left:30px;top:26px";
+      const lst = h("div", "lst", frame); lst.style.cssText += "position:absolute;left:10px;top:66px;right:10px;height:480px";
+      const hl = h("div", "", lst); hl.style.cssText += `position:absolute;left:0;right:0;height:40px;border-radius:8px;background:rgba(239,138,92,.18);box-shadow:inset 4px 0 0 ${C.accent}`;
+      const lines = prog.map((ins, i) => {
+        const [op, a, b, cc, cm] = ins;
+        const e = h("div", "row", lst, `<span class="dim">${String(i).padStart(2)}</span>  <span style="color:${C.teal};font-weight:600">${op.padEnd(10)}</span>${String(a).padStart(3)}${String(b).padStart(4)}${String(cc).padStart(4)}  <span class="dim">${cm}</span>`);
+        e.style.top = `${i * 40}px`; return e;
+      });
+      const regs = [1, 2, 3, 4].map((r, i) => { const e = h("div", "reg", frame, `<b>r${r}</b><span></span>`); e.style.left = `${30 + i * 125}px`; e.style.top = "570px"; return e; });
+      const curEl = h("div", "reg", frame, `<b>cursor</b><span></span>`); curEl.style.cssText += "left:530px;top:570px;width:120px";
+      const fuel = h("div", "", frame); fuel.style.cssText += "position:absolute;left:30px;top:665px;width:740px;height:12px;border-radius:6px;background:rgba(255,255,255,.07);overflow:hidden";
+      const fuelFill = h("div", "", fuel); fuelFill.style.cssText += `height:100%;background:linear-gradient(90deg,${C.accent},${C.violet})`;
+      const fuelLbl = h("div", "label", frame, "fuel"); fuelLbl.style.cssText += "position:absolute;left:30px;top:690px;font-size:15px";
+      const outEl = h("div", "mono", frame); outEl.style.cssText += `position:absolute;left:30px;top:725px;right:30px;font-size:21px;color:${C.good};white-space:nowrap;overflow:hidden`;
+      return { frame, hl, lines, regs, curEl, fuelFill, fuelLbl, outEl, ttl };
+    };
+    const A = mk("VM · process A"), B = mk("VM · process B (fresh)");
+    const badge = h("div", "abs", root, "⏸ paused · out of fuel"); badge.style.cssText += `font:700 26px/1 Inter;padding:14px 24px;border-radius:999px;background:${C.accent};color:${C.ink}`;
+    const json = h("div", "abs mono", root); json.style.cssText += `font-size:23px;line-height:1.55;padding:28px 34px;border-radius:18px;background:#1c1a24;border:2px solid ${C.violet};box-shadow:0 0 70px rgba(169,147,240,.4);width:720px;white-space:pre;color:${C.text}`;
+    const bytes = h("div", "abs label", root); bytes.style.color = C.violet;
+    return { c, prog, states, A, B, badge, json, bytes };
+  },
+  update(st, t, S) {
+    chipUpdate(st.c, t);
+    const [p0, p1, p2, p3, p4, p5] = S.p;
+    const runStart = p0 + 1.6, rate = 9; // instructions / second
+    const pauseAt = p2 + 0.55;
+    const pausedStep = Math.floor((pauseAt - runStart) * rate);
+    const resumeAt = p5 + 0.5;
+    // which step is each VM on?
+    let stepA = Math.floor(clamp(t - runStart, 0, 99) * rate);
+    stepA = Math.min(stepA, pausedStep);
+    let stepB = t >= resumeAt ? pausedStep + Math.floor((t - resumeAt) * rate) : -1;
+    stepB = Math.min(stepB, st.states.length - 1);
+    // layout: A centered, slides left on save; B slides in from right on resume
+    const slide = easeIO(prog(t, p3 - 0.1, p3 + 0.7));
+    const bIn = easeIO(prog(t, p4 + 0.1, p4 + 1.0));
+    const ax = lerp(560, 100, slide), bx = lerp(1960, 1020, bIn);
+    const intro = easeOut(prog(t, 0.2, 0.9));
+    st.A.frame.style.transform = `translate(${ax}px, ${170 + (1 - intro) * 40}px)`; st.A.frame.style.opacity = intro;
+    st.B.frame.style.transform = `translate(${bx}px, 170px)`; st.B.frame.style.opacity = bIn;
+    const drawVM = (V, step, active, appearT) => {
+      V.lines.forEach((e, i) => { const u = easeOut(prog(t, appearT + i * 0.07, appearT + 0.3 + i * 0.07)); e.style.opacity = u; e.style.transform = `translateX(${(1 - u) * 30}px)`; });
+      const s0 = step >= 0 ? st.states[Math.min(step, st.states.length - 1)] : null;
+      V.hl.style.opacity = s0 ? 1 : 0;
+      if (s0) V.hl.style.top = `${s0.pc * 40}px`;
+      V.regs.forEach((r, i) => { const v = s0 ? s0.regs[i + 1] : null; r.querySelector("span").textContent = s0 && v !== null && v !== undefined ? String(v).replace("cust", "c") : "·"; });
+      V.curEl.querySelector("span").textContent = s0 && s0.cur >= 0 ? `row ${s0.cur}` : "·";
+      V.outEl.textContent = s0 ? s0.out.slice(-3).join("   ") : "";
+      V.frame.style.filter = active ? "none" : "saturate(.2) brightness(.7)";
+    };
+    drawVM(st.A, t >= runStart ? stepA : -1, !(t > pauseAt), 0.5);
+    drawVM(st.B, stepB, true, p4 + 0.2);
+    if (t > resumeAt) st.B.hl.style.boxShadow = `inset 4px 0 0 ${C.accent}, 0 0 ${20 * (1 - prog(t, resumeAt, resumeAt + 1))}px ${C.accent}`;
+    // fuel drains to zero exactly at the pause
+    const fuelLeft = 1 - clamp((t - runStart) / (pauseAt - runStart));
+    st.A.fuelFill.style.width = `${fuelLeft * 100}%`;
+    st.A.fuelLbl.textContent = `fuel ${Math.max(0, Math.round(fuelLeft * pausedStep))}`;
+    st.B.fuelFill.style.width = `${t > resumeAt ? 100 - clamp((t - resumeAt) / 3) * 30 : 100}%`;
+    st.B.fuelLbl.textContent = "fuel";
+    // superpower: frame glow pulse
+    const pulse = Math.max(0, 1 - Math.abs(t - p1 - 0.8) / 0.8);
+    st.A.frame.style.boxShadow = `0 30px 80px rgba(0,0,0,.45), 0 0 ${80 * pulse}px rgba(239,138,92,${0.5 * pulse})`;
+    // pause badge
+    const bu = prog(t, pauseAt, pauseAt + 0.35);
+    at(st.badge, ax + 400, 140, { opacity: easeOut(bu) * (1 - prog(t, p4, p4 + 0.3)), scale: 0.7 + 0.3 * back(bu) });
+    // snapshot JSON card: rises out of A on "save", flies to B on "resume", dissolves on "elsewhere"
+    const sp = st.states[pausedStep];
+    st.json.textContent = `{\n  "pc": ${sp.pc},\n  "regs": ${JSON.stringify(sp.regs.slice(1)).replace(/,/g, ", ")},\n  "cursors": [{"table": "customers", "row": ${sp.cur}}],\n  "emitted": ${sp.out.length}\n}`;
+    const n = new Blob([st.json.textContent]).size;
+    const ju = easeOut(prog(t, p3 - 0.05, p3 + 0.5));
+    const fly = easeIO(prog(t, p4 + 0.3, p5 + 0.3));
+    const park = easeIO(prog(t, p3, p3 + 0.7));
+    const jx = lerp(lerp(ax + 400, 1410, park), 1420, fly), jy = lerp(lerp(560, 540, park), 420, fly);
+    const dissolve = prog(t, p5 + 0.2, p5 + 0.6);
+    at(st.json, jx, jy, { opacity: ju * (1 - dissolve), scale: (0.6 + 0.4 * back(ju)) * (1 - 0.35 * fly) * (1 - 0.3 * dissolve), blur: dissolve * 10 });
+    st.bytes.textContent = `snapshot · ${n} bytes`;
+    at(st.bytes, jx, jy - 185 * (1 - 0.35 * fly), { opacity: ju * (1 - dissolve) });
+  },
+};
+
+// ---------- 9. tease ----------
+SCENES.tease = {
+  build(S) {
+    const how = h("div", "abs serif", root, "<i>How?</i>"); how.style.cssText += "font-size:200px;font-weight:600";
+    const p7 = h("div", "abs", root, `<span class="mono" style="color:${C.accent};font-weight:700">07</span>&nbsp;&nbsp;Bytecode`); p7.style.cssText += "font-size:44px;font-weight:600";
+    const cursor = h("div", "abs", root); cursor.style.cssText += `width:22px;height:46px;background:${C.accent}`;
+    return { how, p7, cursor };
+  },
+  update(st, t, S) {
+    BG.tint = 1;
+    const [p0, p1] = S.p;
+    const u = prog(t, p0 - 0.15, p0 + 0.35);
+    at(st.how, 960, 470, { opacity: easeOut(u), scale: 1.15 - 0.15 * easeOut(u), blur: (1 - u) * 18 });
+    rise(st.p7, 940, 650, t, p1, 0.4);
+    at(st.cursor, 1120, 650, { opacity: t > p1 + 0.3 && Math.floor(t * 2.6) % 2 === 0 ? 1 : 0 });
+  },
+};
+
+// ---------- 10. outro ----------
+SCENES.outro = {
+  build(S) {
+    const title = h("div", "abs serif", root, `Building a query <span style="color:${C.accent}">execution</span> engine`); title.style.cssText += "font-size:86px;font-weight:600;white-space:nowrap;letter-spacing:-.015em";
+    const sub = h("div", "abs", root, "seven parts · from scratch"); sub.style.cssText += `font-size:30px;color:${C.soft}`;
+    const cards = [
+      ["Interactive figures", "in every post", C.accent],
+      ["Go & Clojure", "working engines", C.teal],
+      ["Build your own", "start at part 1", C.violet],
+    ].map(([a, b, col]) => {
+      const e = h("div", "panel", root); e.style.cssText += "width:500px;height:300px";
+      e.innerHTML = `<div style="position:absolute;left:36px;top:36px;width:14px;height:14px;border-radius:50%;background:${col};box-shadow:0 0 20px ${col}"></div>
+        <div class="serif" style="position:absolute;left:36px;top:76px;font-size:44px;font-weight:600">${a}</div>
+        <div style="position:absolute;left:36px;top:142px;font-size:26px;color:${C.soft}">${b}</div><div class="viz" style="position:absolute;left:36px;right:36px;bottom:30px;height:70px"></div>`;
+      return e;
+    });
+    // mini visuals inside cards
+    const v1 = cards[0].querySelector(".viz"); const minis = [];
+    for (let i = 0; i < 16; i++) { const b = h("div", "", v1); b.style.cssText += `position:absolute;bottom:0;width:18px;left:${i * 27}px;border-radius:4px 4px 0 0;background:${C.accent}`; minis.push(b); }
+    cards[1].querySelector(".viz").innerHTML = `<div class="mono" style="font-size:20px;line-height:1.7;color:${C.soft}"><span style="color:${C.teal}">$</span> go run ./cmd/engine<br><span style="color:${C.teal}">$</span> clojure -M -m engine.main</div>`;
+    const steps = ["01", "02", "03", "04", "05", "06", "07"].map((n, i) => { const e = h("div", "mono", cards[2].querySelector(".viz"), n); e.style.cssText += `position:absolute;left:${i * 61}px;bottom:10px;width:50px;height:40px;line-height:40px;text-align:center;border-radius:8px;font-size:18px;font-weight:700;background:rgba(169,147,240,.15);color:${C.violet}`; return e; });
+    const cta = h("div", "abs", root, `site/index.html &nbsp;→&nbsp; <span style="color:${C.text}">Part 1 · Expressions</span>`); cta.style.cssText += `font:500 30px/1 Inter;color:${C.soft}`;
+    return { title, sub, cards, minis, steps, cta };
+  },
+  update(st, t, S) {
+    BG.tint = 0;
+    const [p0, p1, p2] = S.p;
+    const tu = easeOut(prog(t, 0.0, 0.8));
+    at(st.title, 960, 230 + (1 - tu) * 30, { opacity: tu, blur: (1 - tu) * 10 });
+    rise(st.sub, 960, 320, t, 0.4, 0.6);
+    const times = [p0, p1, p2];
+    st.cards.forEach((c, i) => {
+      const u = prog(t, times[i] - 0.15, times[i] + 0.45);
+      c.style.left = "0"; c.style.top = "0";
+      c.style.transform = `translate(${160 + i * 550}px, ${430 + (1 - easeOut(u)) * 60}px) scale(${0.9 + 0.1 * back(u)})`;
+      c.style.opacity = easeOut(u);
+    });
+    st.minis.forEach((b, i) => { b.style.height = `${18 + 50 * (0.5 + 0.5 * Math.sin(t * 3 + i * 0.7))}px`; });
+    st.steps.forEach((e, i) => { const on = t > p2 + 0.3 + i * 0.12; e.style.background = on ? C.violet : "rgba(169,147,240,.15)"; e.style.color = on ? C.ink : C.violet; });
+    rise(st.cta, 960, 860, t, p2 + 1.2, 0.6);
+  },
+};
+
+// ============================================================================================
+// Driver
+// ============================================================================================
+const TLN = window.TL;
+let current = null;
+function sceneAt(T) {
+  const sc = TLN.scenes; for (let i = sc.length - 1; i >= 0; i--) if (T >= sc[i].start) return sc[i];
+  return sc[0];
+}
+function S_of(sc) {
+  return { dur: sc.dur, p: sc.phrases.map((p) => p.start - sc.start), e: sc.phrases.map((p) => p.start - sc.start + p.dur) };
+}
+window.renderAt = function (T, frame = 0) {
+  const sc = sceneAt(T), def = SCENES[sc.id], S = S_of(sc);
+  if (!current || current.id !== sc.id) {
+    root.innerHTML = ""; root.style.cssText = ""; BG.tint = 0;
+    current = { id: sc.id, st: def.build(S) };
+  }
+  const lt = T - sc.start;
+  def.update(current.st, lt, S);
+  let o = 1;
+  if (def.fadeIn !== false) o = Math.min(o, easeOut(prog(lt, 0, 0.35)));
+  if (def.fadeOut !== false) o = Math.min(o, 1 - easeIn(prog(lt, sc.dur - 0.35, sc.dur)));
+  if (sc.id === "outro") o = Math.min(o, 1 - prog(lt, sc.dur - 1.0, sc.dur));
+  root.style.opacity = o;
+  drawBg(T);
+  drawFg(T, frame);
+};
+window.TOTAL = TLN.total;
+// Live preview when opened directly: ?t=12.3 shows a frame; otherwise plays in real time.
+(async () => {
+  await document.fonts.ready;
+  const q = new URLSearchParams(location.search);
+  if (window.__capture) return;
+  if (q.has("t")) { renderAt(parseFloat(q.get("t"))); return; }
+  const t0 = performance.now(); let f = 0;
+  const loop = () => { const T = ((performance.now() - t0) / 1000) % TLN.total; renderAt(T, f++); requestAnimationFrame(loop); };
+  loop();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Part 2 · Iterators — Execution Engine</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/common.js"></script>
+<script src="../assets/viz/02-iterators.js" defer></script>
+<style>
+  .pl-grid { display: grid; grid-template-columns: minmax(16rem, 1fr) minmax(16rem, 1.3fr); gap: 1.5rem; align-items: start; }
+  @media (max-width: 700px) { .pl-grid { grid-template-columns: 1fr; } }
+  .pl-op { border: 1.5px solid var(--rule); border-radius: 8px; padding: .5rem .75rem; background: var(--bg); transition: background .15s, border-color .15s; }
+  .pl-op.active { border-color: var(--accent); background: var(--accent-soft); }
+  .pl-op.waiting { border-color: var(--accent); border-style: dashed; }
+  .pl-name { font-weight: 600; display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; }
+  .pl-detail { font: .78rem/1.3 var(--mono); color: var(--ink-soft); font-weight: 400; }
+  .pl-state { display: flex; gap: .35rem; margin-top: .3rem; min-height: 1.1rem; flex-wrap: wrap; }
+  .pl-edge { height: 2.1rem; margin-left: 1.4rem; border-left: 2px solid var(--rule); display: flex; align-items: center; padding-left: .7rem; }
+  .pl-call { font: 600 .78rem/1 var(--mono); color: var(--accent); }
+  .pl-row { font: 600 .78rem/1 var(--mono); color: var(--teal); background: var(--teal-soft); padding: .25rem .45rem; border-radius: 4px; }
+  .pl-done { font: 600 .78rem/1 var(--mono); color: var(--ink-faint); }
+  .pl-reject { margin-top: .6rem; font: .78rem/1.3 var(--mono); color: var(--bad); }
+  .pl-label { font: 600 .7rem/1 var(--sans); text-transform: uppercase; letter-spacing: .08em; color: var(--ink-faint); margin: .9rem 0 .4rem; }
+  .pl-label:first-child { margin-top: 0; }
+  .pl-log { list-style: none; margin: 0; padding: .4rem .6rem; height: 11.5rem; overflow-y: auto; background: var(--bg-sunk); border-radius: 6px; font: .76rem/1.5 var(--mono); color: var(--ink-soft); }
+  .pl-log li { margin: 0; }
+  .pl-log li.cur { color: var(--ink); font-weight: 600; }
+
+  .ms-strip { display: grid; grid-template-columns: repeat(40, 1fr); gap: 2px; max-width: 46rem; }
+  @media (max-width: 700px) { .ms-strip { grid-template-columns: repeat(20, 1fr); } }
+  .sq { display: inline-block; aspect-ratio: 1; border-radius: 2px; background: var(--bg-sunk); border: 1px solid var(--rule); min-width: .7rem; }
+  .ms-strip .sq { min-width: 0; }
+  .sq.read { background: var(--ink-faint); border-color: var(--ink-faint); opacity: .55; }
+  .sq.match { background: var(--accent); border-color: var(--accent); }
+  .ms-legend { display: flex; gap: 1.2rem; flex-wrap: wrap; font-size: .78rem; color: var(--ink-soft); margin: .6rem 0 1.2rem; }
+  .ms-legend .sq { width: .8rem; vertical-align: middle; }
+  .ms-bars { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+  @media (max-width: 700px) { .ms-bars { grid-template-columns: 1fr; } }
+  .ms-col h4 { margin: 0 0 .5rem; font: 600 .85rem/1.2 var(--sans); }
+  .ms-bar { display: grid; grid-template-columns: 8.5rem 1fr 3rem; gap: .5rem; align-items: center; margin-bottom: .35rem; font-size: .8rem; }
+  .ms-bl { color: var(--ink-soft); }
+  .ms-track { height: .8rem; background: var(--bg-sunk); border-radius: 3px; overflow: hidden; }
+  .ms-fill { display: block; height: 100%; border-radius: 3px; transition: width .25s; }
+  .ms-fill.m { background: var(--ink-faint); }
+  .ms-fill.s { background: var(--accent); }
+  .ms-bar b { text-align: right; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Execution Engine</a>
+  <span>Part 2 of 7</span>
+  <span class="spacer"></span>
+  <button class="theme-toggle" type="button">◐ auto</button>
+</header>
+
+<article>
+  <div class="kicker">Part 2 · Iterators</div>
+  <h1>Operators that pull one row at a time</h1>
+  <p class="dek">A query plan is a tree of operators: scan, filter, project, limit. Each one asks
+    its child for one row, does its bit, and hands one row up. Three methods on an interface are
+    enough to run any plan, and the same interface gives you streaming and early exit for free.</p>
+
+  <div data-warmup></div>
+
+  <p>Part 1 gave us a function from (expression, row) to value. A query needs more than that. It has
+    to get rows out of a table, throw away the ones the <code>WHERE</code> rejects, compute the
+    <code>SELECT</code> list, and stop at the <code>LIMIT</code>. Each of those is a separate step, and
+    the steps have to pass rows to each other somehow.</p>
+
+  <p>"Somehow" is the design decision in this post. There are two obvious answers, and the gap between
+    them is the gap between a toy and an engine you can point at a billion-row table.</p>
+
+  <h2>Option one: every step makes a table</h2>
+
+  <p>The most direct approach treats each step as a function from table to table. The scan produces
+    the whole table. The filter consumes it and produces a smaller one. The projection produces a
+    narrower one, and the limit keeps the first <em>n</em>.</p>
+
+<pre class="pseudo">function run(plan)
+  match plan
+    case Scan(t)          -> return t.rows                           -- all of them
+    case Filter(p, child) -> return [r for r in run(child) if eval(p, r) == true]
+    case Project(es, child) -> return [[eval(e, r) for e in es] for r in run(child)]
+    case Limit(n, child)  -> return run(child)[0 : n]
+</pre>
+
+  <p>This is easy to write and easy to debug, because every intermediate result is sitting there to
+    inspect. It also has two problems that get worse with scale. Every intermediate result is fully
+    built in memory, so memory use is the size of the largest intermediate. And <code>LIMIT 10</code>
+    on a billion-row table still filters a billion rows, then throws away all but ten. The limit knows
+    it only wants ten, but by the time it runs, the work is done.</p>
+
+  <h2>Option two: every step is an iterator</h2>
+
+  <p>The alternative, from Goetz Graefe's Volcano system (1994) and still the shape of Postgres's and
+    MySQL's executors, is to make every operator implement the same tiny interface. (SQLite does
+    something different, which is where part 7 ends up.)</p>
+
+<pre class="pseudo">interface Operator
+  Open()                   -- get ready: open children, allocate state
+  Next() -> (row, ok)      -- produce the next row, or ok = false when exhausted
+  Close()                  -- release resources, close children
+  Schema() -> [names]      -- the columns of the rows this produces
+</pre>
+
+  <p>An operator doesn't know or care what its child is. It calls <code>Next()</code> on it. A plan is
+    a tree of these objects, and running the plan means pulling on the root:</p>
+
+<pre class="pseudo">function run(root)
+  root.Open()
+  loop
+    (row, ok) = root.Next()
+    if not ok then break
+    emit(row)                -- send to the client, write to a socket…
+  root.Close()
+</pre>
+
+  <p>Here are the four simplest operators. They're short, and that's the point:</p>
+
+<pre class="pseudo">struct Scan { table, pos }
+  method Open()  pos = 0
+  method Next()
+    if pos >= len(table.rows) then return (nil, false)
+    pos = pos + 1
+    return (table.rows[pos - 1], true)
+
+struct Filter { pred, child }               -- pred is a compiled closure from part 1
+  method Next()
+    loop
+      (row, ok) = child.Next()
+      if not ok then return (nil, false)
+      if pred(row) == true then return (row, true)
+      -- otherwise: drop it and pull again
+
+struct Project { exprs, child }
+  method Next()
+    (row, ok) = child.Next()
+    if not ok then return (nil, false)
+    return ([e(row) for e in exprs], true)
+
+struct Limit { n, count, child }
+  method Open()  count = 0; child.Open()
+  method Next()
+    if count >= n then return (nil, false)  -- stop: don't even ask the child
+    (row, ok) = child.Next()
+    if not ok then return (nil, false)
+    count = count + 1
+    return (row, true)
+</pre>
+
+  <p>Now run <code>SELECT name FROM customers WHERE city = 'Austin' LIMIT 2</code> through it, one
+    event at a time. Watch two things: where the <code>Next()</code> calls are at each moment, and how
+    much of the table has been read when the query finishes.</p>
+
+  <div id="viz-pull"></div>
+
+  <p>Control flows down and data flows up. Every row the driver receives was produced by Scan at the
+    bottom and passed hand to hand, unchanged or transformed, through every operator above it. At no
+    point does any operator hold more than the one row it's working on.</p>
+
+  <p>Look at LIMIT 2 in particular. Scan reads Ada (pass), Bo (dropped), Cy (pass), and then Limit's
+    count is 2. The driver's third call returns <em>done</em> immediately, and Limit never asks Project
+    for another row. <strong>Di is never read.</strong> On four rows that saves almost nothing. On real
+    data it's the difference between reading a page and reading the whole table:</p>
+
+  <div id="viz-stream"></div>
+
+  <p>This is what <strong>pipelining</strong> means. A pipelined operator can produce output rows as
+    soon as it has consumed enough input to compute them. Scan, Filter, Project, and Limit all need
+    exactly one input row per step, so a chain of them uses constant memory no matter how big the
+    table is, and it stops the moment the consumer stops asking.</p>
+
+  <h3>The opposite: pipeline breakers</h3>
+
+  <p>Not every operator can work that way. <code>ORDER BY</code> can't return its first row until it has
+    seen <em>every</em> input row, because the last row read might sort first. The same goes for
+    <code>GROUP BY</code> (the last row might belong to the first group) and for the build side of a
+    hash join (next post). These operators are <strong>pipeline breakers</strong>. Their
+    <code>Next()</code> still has the same signature, but the first call does a lot of work: it drains
+    the child completely into some internal structure, then starts handing out results.</p>
+
+<pre class="pseudo">struct Sort { keys, child, buffer, pos }
+  method Next()
+    if buffer is null then                -- first call: consume everything
+      buffer = []
+      loop
+        (row, ok) = child.Next()
+        if not ok then break
+        append(buffer, row)
+      sortStable(buffer, keys)
+      pos = 0
+    if pos >= len(buffer) then return (nil, false)
+    pos = pos + 1
+    return (buffer[pos - 1], true)
+</pre>
+
+  <p>A plan is a series of pipelines joined at pipeline breakers. Within a pipeline, rows stream;
+    at a breaker, everything stops until the input is consumed. Keep that picture in mind for part 7,
+    where the compiler's structure follows directly from it.</p>
+
+  <h2>Where the state lives</h2>
+
+  <p>Look at the operator boxes in the first figure again. Each operator's own state is a field on
+    the operator: Scan's <code>pos</code>, Limit's <code>count</code>, Sort's buffer. Those are on the
+    heap. They persist between <code>Next()</code> calls, and they're the <em>only</em> thing that
+    persists.</p>
+
+  <p>During a call, there's more. When Filter calls Scan, Filter's stack frame is waiting on the call
+    stack, and the dashed boxes in the figure are exactly those waiting frames. If you wanted to stop
+    in the middle, say right after Scan returns Bo but before Filter has dropped him, that
+    in-progress state is spread across four stack frames. You can't easily save it.</p>
+
+  <p>Between calls to the root's <code>Next()</code>, though, the stack is empty. Everything is in
+    operator fields. That means a Volcano plan is naturally <em>resumable at row boundaries</em>:
+    stop calling <code>Next()</code>, come back later, call it again, and the plan continues. That's
+    how database cursors and <code>FETCH 100</code> work. Whether you can do better than row
+    boundaries, and whether you can save the state somewhere and restore it in another process, is a
+    question for the last part of this series.</p>
+
+  <h2>What it costs</h2>
+
+  <p>The iterator model has a well-known price: one virtual call per operator per row, through an
+    interface the CPU can't predict, with little opportunity for the compiler to optimize across operator
+    boundaries. For a plan five operators deep over a hundred million rows, that's half a billion
+    indirect calls just moving rows around, before any real work.</p>
+
+  <p>Modern engines attack this cost in two directions. <strong>Vectorized</strong> engines (MonetDB/X100,
+    DuckDB, most column stores) keep the pull interface but make <code>Next()</code> return a batch of
+    ~1000 rows stored as column arrays, which cuts the call overhead by three orders of magnitude and
+    gives the CPU tight loops it can run fast. <strong>Compiled</strong> engines (HyPer, Umbra) turn
+    the model inside out: instead of each operator pulling from below, the scan <em>pushes</em> each row
+    up through all the operators of a pipeline in a single generated loop. We'll build a small version of
+    the push model in part 7.</p>
+
+  <div class="aside"><p>The Clojure lesson implements the same interface as a protocol
+    (<code>open!</code>, <code>next!</code>, <code>close!</code>, <code>schema</code>) with mutable state in
+    <code>volatile!</code>s. That's unusual Clojure, and it's deliberate. The lazy-seq version,
+    <code>(take 2 (map project (filter pred rows)))</code>, is the same pull model with the machinery
+    hidden, and it's worth writing once to see that. But the explicit version makes the state visible,
+    and the state is what this series is about.</p></div>
+
+  <div class="sqlglot"><p>sqlglot's executor is option one. Each step of its plan (Scan, Join,
+    Aggregate, Sort, SetOperation) returns a complete <code>Table</code>, which is a list of row tuples,
+    and the next step reads that list. Filters and projections are fused into the step that produces
+    the rows: a Scan step carries its own condition, projections, and limit, and its loop
+    <code>break</code>s once the sink holds enough rows. So <code>SELECT … WHERE … LIMIT 2</code>
+    over one table does stop early, because the planner put all three steps in one loop by hand.
+    Across step boundaries it can't: a limit after a join or an aggregate runs only after that step
+    has built its whole output table, and memory use is proportional to the largest intermediate.
+    That's a fine trade for a teaching engine running over Python lists. The iterator interface gets the
+    same early exit everywhere, for free, without a special case.</p></div>
+
+  <div class="code-ref"><p><code>go/lesson02/iterators.go</code> ·
+    <code>clojure/src/lesson02/iterators.clj</code> (ns <code>lesson02.iterators</code>). The
+    <code>Operator</code> interface/protocol, Scan, Filter, Project, Limit, and a tracing wrapper that
+    prints each <code>Next()</code> call indented by depth, the same log as the figure:
+    <code>go run ./cmd/lesson02</code> / <code>clojure -M -m lesson02.iterators</code>.</p></div>
+
+  <div class="build-it"><p>The exercise track for this part has the reference lesson with the
+    interesting function bodies replaced by TODOs, and tests that fail until you fill them in. For this
+    part: <code>filter-next</code>, <code>limit-next</code> (see <a href="../../EXERCISES.md">EXERCISES.md</a> for the current list and hints).</p>
+    <p><code>cd go &amp;&amp; go test ./exercises/lesson02/</code><br>
+    <code>cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson02.iterators-test</code></p></div>
+
+  <div class="takeaway"><p>Give every operator <code>Open</code>/<code>Next</code>/<code>Close</code> and
+    a plan becomes a tree you pull on. Rows stream through pipelines in constant memory, a
+    <code>LIMIT</code> stops the work as soon as it's satisfied, and between calls all of the query's
+    state sits in operator fields, so it can stop and resume at any row boundary.</p></div>
+
+  <div data-series></div>
+</article>
+</body>
+</html>

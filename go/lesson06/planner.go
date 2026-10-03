@@ -1,0 +1,459 @@
+// Package lesson06 is part 6: statistics and planning.
+//
+// Lessons 2–5 built operators. Every query can be run by many different trees of them: which
+// table first, which join algorithm, scan or index. They return the same rows at wildly different
+// costs. The planner picks one, and it has to do so *without running anything*. So it guesses:
+//
+//  1. Statistics (stats.go): row counts, distinct counts, min/max, histograms — collected once.
+//  2. Selectivity: what fraction of rows a predicate keeps, from those statistics.
+//  3. Cardinality: how many rows each plan node will produce, from selectivities.
+//  4. Cost: a number per node, from cardinalities, in made-up units (DESIGN.md).
+//  5. Search: dynamic programming over subsets of tables (Selinger, 1979) finds the cheapest
+//     left-deep join order without trying every permutation.
+//
+// Then EXPLAIN shows the guesses, and running the plan shows how wrong they were.
+package lesson06
+
+import (
+	"fmt"
+	"math"
+	"math/bits"
+	"sort"
+	"strings"
+)
+
+// Plan is a physical plan node, annotated with the planner's estimates and, after running,
+// the actual row count.
+type Plan struct {
+	Op       string // Scan, IndexScan, Filter, HashJoin, NLJoin, IndexNLJoin
+	Table    *Table // Scan, IndexScan, IndexNLJoin (inner)
+	Index    *Index // IndexScan, IndexNLJoin
+	Lookup   Bin    // IndexScan: the `col op literal` the index answers
+	Preds    []Expr // Filter: conjuncts; IndexNLJoin: inner-side filters
+	JoinPred Bin    // joins: the equality used as the key (zero value = cross product)
+	Children []*Plan
+
+	Tables  uint     // bitset of base tables covered
+	Schema  []string // output columns
+	EstRows float64
+	Cost    float64
+
+	ActualRows, Loops int
+}
+
+// Query is the planner's input: some tables and a WHERE clause split into conjuncts.
+type Query struct {
+	Tables []string
+	Where  []Expr
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step 1: access paths — the cheapest way to read one table with its own filters applied.
+// ---------------------------------------------------------------------------------------------
+
+func (c *Catalog) accessPath(table string, bit uint, filters []Expr) *Plan {
+	t := c.Tables[table]
+	rows := float64(len(t.Rows))
+
+	// Option A: scan everything, then filter.
+	best := &Plan{Op: "Scan", Table: t, Tables: bit, Schema: t.Cols, EstRows: rows, Cost: rows}
+	best = c.withFilter(best, filters)
+
+	// Option B: for each filter an index can answer, look it up and filter the rest.
+	for i, f := range filters {
+		b, ok := f.(Bin)
+		if !ok {
+			continue
+		}
+		col, lit, op, ok := colOpLit(b)
+		if !ok || op == "!=" || c.Indexes[col] == nil {
+			continue
+		}
+		matches := rows * c.Selectivity(f)
+		scan := &Plan{Op: "IndexScan", Table: t, Index: c.Indexes[col], Lookup: Bin{Op: op, L: C(col), R: Lit{lit}},
+			Tables: bit, Schema: t.Cols, EstRows: matches,
+			Cost: math.Log2(rows+1) + matches} // one descent + one fetch per match
+		rest := append(append([]Expr{}, filters[:i]...), filters[i+1:]...)
+		if p := c.withFilter(scan, rest); p.Cost < best.Cost {
+			best = p
+		}
+	}
+	return best
+}
+
+// withFilter puts a Filter node on top (if there are filters): cost = rows examined.
+func (c *Catalog) withFilter(child *Plan, preds []Expr) *Plan {
+	if len(preds) == 0 {
+		return child
+	}
+	sel := 1.0
+	for _, p := range preds {
+		sel *= c.Selectivity(p)
+	}
+	return &Plan{Op: "Filter", Preds: preds, Children: []*Plan{child}, Tables: child.Tables, Schema: child.Schema,
+		EstRows: child.EstRows * sel, Cost: child.Cost + child.EstRows}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step 2: joining one more table onto a plan, with each algorithm.
+// ---------------------------------------------------------------------------------------------
+
+// joinCandidates returns every way to join base table t (its access path `right`, its filters
+// `rightFilters`) onto `left`, using `key` if there is one. key is oriented: key.L is a column of
+// the left side, key.R a column of t.
+func (c *Catalog) joinCandidates(left, right *Plan, rightFilters []Expr, key *Bin, residual []Expr) []*Plan {
+	tables := left.Tables | right.Tables
+	schema := append(append([]string{}, left.Schema...), right.Schema...)
+	keySel := 1.0
+	if key != nil {
+		keySel = c.Selectivity(*key)
+	}
+	est := left.EstRows * right.EstRows * keySel // rows out of the join, before residual filters
+
+	var out []*Plan
+	add := func(p *Plan) { out = append(out, c.withFilter(p, residual)) }
+
+	// Nested loop: every pair. Works for anything, including no key at all.
+	nl := &Plan{Op: "NLJoin", Children: []*Plan{left, right}, Tables: tables, Schema: schema, EstRows: est,
+		Cost: left.Cost + right.Cost + left.EstRows*right.EstRows}
+	if key != nil {
+		nl.JoinPred = *key
+	}
+	add(nl)
+
+	if key == nil {
+		return out
+	}
+	leftCol, rightCol := key.L.(Col).Name, key.R.(Col).Name
+
+	// Hash: build a table on the right (2 units per build row), probe with the left.
+	add(&Plan{Op: "HashJoin", JoinPred: B("=", C(leftCol), C(rightCol)).(Bin), Children: []*Plan{left, right},
+		Tables: tables, Schema: schema, EstRows: est,
+		Cost: left.Cost + right.Cost + 2*right.EstRows + left.EstRows})
+
+	// Index nested loop: if the right side's join column is indexed, look each left row up.
+	// The right side's own filters run on what the index returns.
+	if idx := c.Indexes[rightCol]; idx != nil {
+		t := c.Tables[tableOf(rightCol)]
+		innerRows := float64(len(t.Rows))
+		fetched := left.EstRows * innerRows * keySel // matches before the inner filters
+		filterSel := 1.0
+		for _, f := range rightFilters {
+			filterSel *= c.Selectivity(f)
+		}
+		cost := left.Cost + left.EstRows*math.Log2(innerRows+1) + fetched
+		if len(rightFilters) > 0 {
+			cost += fetched
+		}
+		add(&Plan{Op: "IndexNLJoin", Table: t, Index: idx, Preds: rightFilters,
+			JoinPred: B("=", C(leftCol), C(rightCol)).(Bin), Children: []*Plan{left},
+			Tables: tables, Schema: schema, EstRows: fetched * filterSel, Cost: cost})
+	}
+	return out
+}
+
+// orient flips `a = b` if needed so that the left column belongs to the left side.
+func (p *Planner) orient(key Bin, right uint) Bin {
+	if p.tablesOf(key.L)&right != 0 {
+		return Bin{Op: key.Op, L: key.R, R: key.L}
+	}
+	return key
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step 3: dynamic programming over subsets.
+// ---------------------------------------------------------------------------------------------
+
+// Planner holds one query's planning state.
+type Planner struct {
+	cat        *Catalog
+	names      []string        // table i ↔ bit 1<<i
+	filters    map[uint][]Expr // single-table conjuncts, by table bit
+	multi      []Expr          // conjuncts spanning tables
+	Best       map[uint]*Plan  // the DP table: cheapest plan for each subset of tables
+	Considered int             // candidate plans costed
+}
+
+func (p *Planner) bit(table string) uint {
+	for i, n := range p.names {
+		if n == table {
+			return 1 << i
+		}
+	}
+	panic("table not in query: " + table)
+}
+
+// tablesOf returns the bitset of tables an expression mentions.
+func (p *Planner) tablesOf(e Expr) uint {
+	var b uint
+	for _, col := range Columns(e) {
+		b |= p.bit(tableOf(col))
+	}
+	return b
+}
+
+// Plan finds the cheapest left-deep plan.
+func (c *Catalog) Plan(q Query) (*Planner, *Plan) {
+	p := &Planner{cat: c, names: q.Tables, filters: map[uint][]Expr{}, Best: map[uint]*Plan{}}
+	for _, w := range q.Where {
+		if tb := p.tablesOf(w); bits.OnesCount(tb) == 1 {
+			p.filters[tb] = append(p.filters[tb], w)
+		} else {
+			p.multi = append(p.multi, w)
+		}
+	}
+
+	n := len(q.Tables)
+	// Base case: subsets of size 1 are just access paths.
+	for i, name := range q.Tables {
+		b := uint(1) << i
+		p.Best[b] = c.accessPath(name, b, p.filters[b])
+		p.Considered++
+	}
+	p.grow(n)
+	return p, p.Best[1<<n-1]
+}
+
+// grow fills the DP table bottom-up: the best plan for a set S of tables is the cheapest of
+// (best plan for S−{t}) ⋈ t over every t in S, tried with every join algorithm.
+func (p *Planner) grow(n int) {
+	// EXERCISE(join-order-dp): For subset sizes 2..n, for each subset S and each table t in it,
+	// extend Best[S−{t}] by joining t (joinPreds, orient, joinCandidates) and keep the cheapest
+	// candidate in Best[S]. Skip cross products when another order could use a join predicate.
+	c := p.cat
+	for size := 2; size <= n; size++ {
+		for s := uint(1); s < 1<<n; s++ {
+			if bits.OnesCount(s) != size {
+				continue
+			}
+			for i := 0; i < n; i++ {
+				t := uint(1) << i
+				if s&t == 0 || p.Best[s&^t] == nil {
+					continue
+				}
+				left := p.Best[s&^t]
+				key, residual, connected := p.joinPreds(left.Tables, t)
+				if !connected && p.anyConnection(s&^t, t) {
+					continue // avoid cross products when some other order can use a predicate
+				}
+				if key != nil {
+					oriented := p.orient(*key, t)
+					key = &oriented
+				}
+				for _, cand := range c.joinCandidates(left, p.Best[t], p.filters[t], key, residual) {
+					p.Considered++
+					if cur := p.Best[s]; cur == nil || cand.Cost < cur.Cost {
+						p.Best[s] = cand
+					}
+				}
+			}
+		}
+	}
+	// END EXERCISE
+}
+
+// joinPreds splits the multi-table conjuncts that become applicable when t joins `left`: the
+// first column=column equality is the join key; the rest are residual filters.
+func (p *Planner) joinPreds(left, t uint) (key *Bin, residual []Expr, connected bool) {
+	for _, w := range p.multi {
+		tb := p.tablesOf(w)
+		if tb&t == 0 || tb&^(left|t) != 0 {
+			continue // doesn't involve t, or needs a table we don't have yet
+		}
+		connected = true
+		if b, ok := w.(Bin); ok && b.Op == "=" && key == nil {
+			_, lc := b.L.(Col)
+			_, rc := b.R.(Col)
+			if lc && rc {
+				key = &b
+				continue
+			}
+		}
+		residual = append(residual, w)
+	}
+	return
+}
+
+func (p *Planner) anyConnection(left, t uint) bool {
+	for _, w := range p.multi {
+		if tb := p.tablesOf(w); tb&t != 0 && tb&left != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// SubsetName prints a DP-table key like {customers, orders}.
+func (p *Planner) SubsetName(s uint) string {
+	var parts []string
+	for i, n := range p.names {
+		if s&(1<<i) != 0 {
+			parts = append(parts, n)
+		}
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+// Subsets returns DP-table keys in order of size, then value.
+func (p *Planner) Subsets() []uint {
+	var keys []uint
+	for k := range p.Best {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		ci, cj := bits.OnesCount(keys[i]), bits.OnesCount(keys[j])
+		if ci != cj {
+			return ci < cj
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
+}
+
+// Shape is a one-line summary of a plan: (customers ⋈hash orders).
+func Shape(p *Plan) string {
+	switch p.Op {
+	case "Scan", "IndexScan":
+		if p.Op == "IndexScan" {
+			return p.Table.Name + "(idx)"
+		}
+		return p.Table.Name
+	case "Filter":
+		return Shape(p.Children[0])
+	case "HashJoin":
+		return "(" + Shape(p.Children[0]) + " ⋈hash " + Shape(p.Children[1]) + ")"
+	case "NLJoin":
+		return "(" + Shape(p.Children[0]) + " ⋈nl " + Shape(p.Children[1]) + ")"
+	case "IndexNLJoin":
+		return "(" + Shape(p.Children[0]) + " ⋈idx " + p.Table.Name + ")"
+	}
+	return p.Op
+}
+
+// ---------------------------------------------------------------------------------------------
+// EXPLAIN and execution
+// ---------------------------------------------------------------------------------------------
+
+// Explain prints the plan tree with estimates (and actual rows once it has run).
+func Explain(p *Plan, analyzed bool) string {
+	var b strings.Builder
+	var walk func(p *Plan, prefix, childPrefix string)
+	walk = func(p *Plan, prefix, childPrefix string) {
+		label := describe(p)
+		stats := fmt.Sprintf("est=%-7.0f cost=%-8.0f", p.EstRows, p.Cost)
+		if analyzed {
+			stats += fmt.Sprintf(" actual=%d", p.ActualRows)
+			if p.Loops > 1 {
+				stats += fmt.Sprintf(" (%d loops)", p.Loops)
+			}
+		}
+		line := prefix + label
+		fmt.Fprintf(&b, "%-72s %s\n", line, stats)
+		for i, c := range p.Children {
+			if i == len(p.Children)-1 {
+				walk(c, childPrefix+"└─ ", childPrefix+"   ")
+			} else {
+				walk(c, childPrefix+"├─ ", childPrefix+"│  ")
+			}
+		}
+	}
+	walk(p, "", "")
+	return b.String()
+}
+
+func describe(p *Plan) string {
+	switch p.Op {
+	case "Scan":
+		return "Scan " + p.Table.Name
+	case "IndexScan":
+		return "IndexScan " + p.Table.Name + " where " + p.Lookup.String()
+	case "Filter":
+		return "Filter " + exprList(p.Preds)
+	case "HashJoin", "NLJoin":
+		if p.JoinPred.Op == "" {
+			return p.Op + " (cross product)"
+		}
+		return p.Op + " " + p.JoinPred.String()
+	case "IndexNLJoin":
+		s := "IndexNLJoin " + p.JoinPred.String()
+		if len(p.Preds) > 0 {
+			s += " (+ " + exprList(p.Preds) + ")"
+		}
+		return s
+	}
+	return p.Op
+}
+
+func exprList(es []Expr) string {
+	parts := make([]string, len(es))
+	for i, e := range es {
+		parts[i] = e.String()
+	}
+	return strings.Join(parts, " AND ")
+}
+
+// Build turns a plan into operators, each wrapped to count the rows it really produces.
+func Build(p *Plan) Operator {
+	var op Operator
+	switch p.Op {
+	case "Scan":
+		op = &Scan{T: p.Table}
+	case "IndexScan":
+		op = &IndexScan{T: p.Table, Index: p.Index, Op: p.Lookup.Op, V: p.Lookup.R.(Lit).V}
+	case "Filter":
+		child := Build(p.Children[0])
+		op = &Filter{Child: child, Pred: Compile(and(p.Preds), child.Schema())}
+	case "HashJoin":
+		l, r := Build(p.Children[0]), Build(p.Children[1])
+		op = &HashJoin{Left: l, Right: r,
+			LeftKey:  indexOf(l.Schema(), p.JoinPred.L.(Col).Name),
+			RightKey: indexOf(r.Schema(), p.JoinPred.R.(Col).Name)}
+	case "NLJoin":
+		l, r := Build(p.Children[0]), Build(p.Children[1])
+		j := &NLJoin{Left: l, Right: r}
+		if p.JoinPred.Op != "" {
+			j.Pred = Compile(p.JoinPred, p.Schema)
+		}
+		op = j
+	case "IndexNLJoin":
+		outer := Build(p.Children[0])
+		j := &IndexNLJoin{Outer: outer, OuterKey: indexOf(outer.Schema(), p.JoinPred.L.(Col).Name),
+			Inner: p.Table, Index: p.Index}
+		if len(p.Preds) > 0 {
+			j.InnerFilter = Compile(and(p.Preds), p.Table.Cols)
+		}
+		op = j
+	default:
+		panic("unknown plan op " + p.Op)
+	}
+	return &counting{Operator: op, plan: p}
+}
+
+// Run executes a plan and returns its rows; afterwards every node has ActualRows filled in.
+func Run(p *Plan) []Row {
+	op := Build(p)
+	op.Open()
+	defer op.Close()
+	var out []Row
+	for {
+		r, ok := op.Next()
+		if !ok {
+			return out
+		}
+		out = append(out, r)
+	}
+}
+
+// NewCatalog generates the dataset, analyzes every table, and builds the DESIGN.md indexes.
+func NewCatalog() *Catalog {
+	customers, products, orders := Generate()
+	c := &Catalog{Tables: map[string]*Table{}, Stats: map[string]*TableStats{}, Indexes: map[string]*Index{}}
+	for _, t := range []*Table{customers, products, orders} {
+		c.Tables[t.Name] = t
+		c.Stats[t.Name] = Analyze(t)
+	}
+	for _, col := range []string{"customers.id", "products.id", "orders.id", "orders.customer_id", "orders.product_id"} {
+		c.Indexes[col] = BuildIndex(c.Tables[tableOf(col)], col)
+	}
+	return c
+}

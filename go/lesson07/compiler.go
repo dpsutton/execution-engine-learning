@@ -1,0 +1,356 @@
+package lesson07
+
+import (
+	"fmt"
+	"strings"
+)
+
+// The compiler uses the produce/consume model (Neumann 2011), the same shape SQLite emits:
+//
+//	produce(node, consume)
+//
+// generates the code that makes node's rows appear, one at a time, in registers. Whenever a row is
+// ready it calls consume(regs) — a Go callback — which emits the code that should run for that
+// row, *inside* the loop being generated. So a Filter's produce is "produce my child, and when a
+// row is ready, emit a test that jumps over consume(regs)". A nested-loop join is "produce the left
+// child; for each row, produce the right child; for each row, consume both". The nesting of Go
+// callbacks becomes the nesting of loops in the bytecode.
+//
+// Pipeline breakers (hash build, aggregate, sort) produce their child with a consume that *stores*
+// the row (HashInsert, AggStep, SorterInsert), then start a new loop over what they stored.
+
+type compiler struct {
+	db        DB
+	prog      *Program
+	indent    int
+	haltJumps []int // addresses of jumps whose target is the final Halt (LIMIT exhausted)
+}
+
+// Compile turns a plan into a program that yields the plan's rows via ResultRow.
+func Compile(plan Plan, db DB) *Program {
+	c := &compiler{db: db, prog: &Program{Columns: plan.Schema(db)}}
+	c.emit(Instr{Op: "Init", P2: 1, Comment: "start at 1"})
+	c.produce(plan, func(regs []int) {
+		first := c.contiguous(regs)
+		c.emit(Instr{Op: "ResultRow", P1: first, P2: len(regs),
+			Comment: fmt.Sprintf("output r[%d..%d]", first, first+len(regs)-1)})
+	})
+	halt := c.emit(Instr{Op: "Halt"})
+	for _, j := range c.haltJumps {
+		c.prog.Instrs[j].P2 = halt
+	}
+	return c.prog
+}
+
+func (c *compiler) emit(in Instr) int {
+	in.Indent = c.indent
+	c.prog.Instrs = append(c.prog.Instrs, in)
+	return len(c.prog.Instrs) - 1
+}
+
+func (c *compiler) here() int { return len(c.prog.Instrs) }
+
+func (c *compiler) reg() int { c.prog.NumRegs++; return c.prog.NumRegs - 1 }
+
+// contiguous makes sure values sit in consecutive registers (ResultRow, inserts, and AggStep read a
+// block), copying them into a fresh block if they don't already.
+func (c *compiler) contiguous(regs []int) int {
+	if len(regs) == 0 {
+		return 0
+	}
+	ok := true
+	for i := range regs {
+		if regs[i] != regs[0]+i {
+			ok = false
+		}
+	}
+	if ok {
+		return regs[0]
+	}
+	first := c.prog.NumRegs
+	for _, r := range regs {
+		dst := c.reg()
+		c.emit(Instr{Op: "Copy", P1: r, P2: dst, Comment: fmt.Sprintf("r[%d]=r[%d]", dst, r)})
+	}
+	return first
+}
+
+// ---------------------------------------------------------------------------------------------
+// produce: one case per plan node
+// ---------------------------------------------------------------------------------------------
+
+func (c *compiler) produce(plan Plan, consume func(regs []int)) {
+	switch p := plan.(type) {
+
+	case Scan:
+		// OpenScan; Rewind (jump past the loop if empty); loop: Column…; consume; Next → loop.
+		cur := c.prog.NumCursors
+		c.prog.NumCursors++
+		c.emit(Instr{Op: "OpenScan", P1: cur, P4: p.Table, Comment: p.Table})
+		rewind := c.emit(Instr{Op: "Rewind", P1: cur, Comment: "if empty, skip loop"})
+		top := c.here()
+		c.indent++
+		cols := c.db[p.Table].Cols
+		regs := make([]int, len(cols))
+		for i, name := range cols {
+			regs[i] = c.reg()
+			c.emit(Instr{Op: "Column", P1: cur, P2: i, P3: regs[i], Comment: fmt.Sprintf("r[%d]=%s", regs[i], name)})
+		}
+		consume(regs)
+		c.indent--
+		c.emit(Instr{Op: "Next", P1: cur, P2: top, Comment: "loop while more rows"})
+		c.prog.Instrs[rewind].P2 = c.here()
+
+	case Filter:
+		c.produceFilter(p, consume)
+
+	case Project:
+		schema := p.Child.Schema(c.db)
+		c.produce(p.Child, func(regs []int) {
+			out := make([]int, len(p.Exprs))
+			for i, e := range p.Exprs {
+				out[i] = c.expr(e, schema, regs)
+			}
+			consume(out)
+		})
+
+	case NLJoin:
+		c.produceNLJoin(p, consume)
+
+	case HashJoin:
+		ht := c.prog.NumHashes
+		c.prog.NumHashes++
+		rs := p.Right.Schema(c.db)
+		// Build: a complete loop over the right side, before anything else.
+		c.emit(Instr{Op: "HashOpen", P1: ht, Comment: "build side: " + strings.Join(rs, ",")})
+		c.produce(p.Right, func(rregs []int) {
+			k := c.expr(p.RightKey, rs, rregs)
+			first := c.contiguous(rregs)
+			c.emit(Instr{Op: "HashInsert", P1: ht, P2: k, P3: first, P4: len(rregs),
+				Comment: "key " + p.RightKey.String()})
+		})
+		// Probe: loop over the left side; for each row, loop over its matches.
+		ls := p.Left.Schema(c.db)
+		c.produce(p.Left, func(lregs []int) {
+			k := c.expr(p.LeftKey, ls, lregs)
+			seek := c.emit(Instr{Op: "HashSeek", P1: ht, P2: k, Comment: "probe " + p.LeftKey.String() + "; none → skip"})
+			top := c.here()
+			c.indent++
+			regs := append([]int{}, lregs...)
+			for i, name := range rs {
+				r := c.reg()
+				c.emit(Instr{Op: "HashColumn", P1: ht, P2: i, P3: r, Comment: fmt.Sprintf("r[%d]=%s", r, name)})
+				regs = append(regs, r)
+			}
+			consume(regs)
+			c.indent--
+			c.emit(Instr{Op: "HashNext", P1: ht, P2: top, Comment: "next match"})
+			c.prog.Instrs[seek].P3 = c.here()
+		})
+
+	case Aggregate:
+		at := c.prog.NumAggs
+		c.prog.NumAggs++
+		fns := make([]string, len(p.Aggs))
+		for i, a := range p.Aggs {
+			fns[i] = a.Fn
+			if a.Arg == nil {
+				fns[i] = "count*"
+			}
+		}
+		c.emit(Instr{Op: "AggOpen", P1: at, P2: len(p.GroupBy), P4: strings.Join(fns, ","), Comment: "GROUP BY " + exprList(p.GroupBy)})
+		schema := p.Child.Schema(c.db)
+		c.produce(p.Child, func(regs []int) {
+			var keys, vals []int
+			for _, g := range p.GroupBy {
+				keys = append(keys, c.expr(g, schema, regs))
+			}
+			for _, a := range p.Aggs {
+				if a.Arg == nil {
+					r := c.reg() // count(*) ignores its value; any register will do
+					c.emit(Instr{Op: "Const", P2: r, P4: int64(1)})
+					vals = append(vals, r)
+				} else {
+					vals = append(vals, c.expr(a.Arg, schema, regs))
+				}
+			}
+			kf, vf := c.contiguous(keys), c.contiguous(vals)
+			c.emit(Instr{Op: "AggStep", P1: at, P2: kf, P3: len(keys), P4: vf, Comment: "accumulate"})
+		})
+		// Second loop: over the finished groups.
+		rewind := c.emit(Instr{Op: "AggRewind", P1: at, Comment: "finalize; if no groups, skip"})
+		top := c.here()
+		c.indent++
+		out := make([]int, len(p.Names))
+		for i := range out {
+			out[i] = c.reg()
+			c.emit(Instr{Op: "AggColumn", P1: at, P2: i, P3: out[i], Comment: fmt.Sprintf("r[%d]=%s", out[i], p.Names[i])})
+		}
+		consume(out)
+		c.indent--
+		c.emit(Instr{Op: "AggNext", P1: at, P2: top})
+		c.prog.Instrs[rewind].P2 = c.here()
+
+	case Sort:
+		st := c.prog.NumSorters
+		c.prog.NumSorters++
+		schema := p.Child.Schema(c.db)
+		width := len(schema)
+		// A sorter record is the row's columns followed by the sort-key values.
+		spec := make([]string, len(p.Keys))
+		for i, k := range p.Keys {
+			spec[i] = fmt.Sprint(width + i)
+			if k.Desc {
+				spec[i] += " desc"
+			}
+		}
+		c.emit(Instr{Op: "SorterOpen", P1: st, P4: strings.Join(spec, ","), Comment: "ORDER BY " + sortList(p.Keys)})
+		c.produce(p.Child, func(regs []int) {
+			rec := append([]int{}, regs...)
+			for _, k := range p.Keys {
+				rec = append(rec, c.expr(k.E, schema, regs))
+			}
+			first := c.contiguous(rec)
+			c.emit(Instr{Op: "SorterInsert", P1: st, P2: first, P3: len(rec)})
+		})
+		sorted := c.emit(Instr{Op: "SorterSort", P1: st, Comment: "sort; if empty, skip"})
+		top := c.here()
+		c.indent++
+		out := make([]int, width)
+		for i := range out {
+			out[i] = c.reg()
+			c.emit(Instr{Op: "SorterColumn", P1: st, P2: i, P3: out[i], Comment: fmt.Sprintf("r[%d]=%s", out[i], schema[i])})
+		}
+		consume(out)
+		c.indent--
+		c.emit(Instr{Op: "SorterNext", P1: st, P2: top})
+		c.prog.Instrs[sorted].P2 = c.here()
+
+	case Limit:
+		counter := c.reg()
+		c.emit(Instr{Op: "Const", P2: counter, P4: int64(p.N), Comment: fmt.Sprintf("r[%d]=LIMIT %d", counter, p.N)})
+		if p.N <= 0 {
+			c.haltJumps = append(c.haltJumps, c.emit(Instr{Op: "Goto", Comment: "LIMIT 0"}))
+		}
+		c.produce(p.Child, func(regs []int) {
+			consume(regs)
+			// After the row has been consumed (yielded), count it; at zero, we're done.
+			c.haltJumps = append(c.haltJumps,
+				c.emit(Instr{Op: "DecrJumpZero", P1: counter, Comment: "LIMIT reached → Halt"}))
+		})
+
+	default:
+		panic(fmt.Sprintf("can't compile %T", plan))
+	}
+}
+
+// produceFilter: produce the child; for each row, test the predicate and skip consume unless true.
+func (c *compiler) produceFilter(p Filter, consume func(regs []int)) {
+	// EXERCISE(compile-filter): Produce the child. In its consume callback, compile the predicate
+	// into a register, emit an IfNot that jumps past this row's code, call consume, and then
+	// patch the jump's target to the address after it.
+	schema := p.Child.Schema(c.db)
+	c.produce(p.Child, func(regs []int) {
+		r := c.expr(p.Pred, schema, regs)
+		skip := c.emit(Instr{Op: "IfNot", P1: r, Comment: "WHERE " + p.Pred.String()})
+		consume(regs)
+		c.prog.Instrs[skip].P2 = c.here()
+	})
+	// END EXERCISE
+}
+
+// produceNLJoin: the right side's whole loop is emitted inside the left side's loop body.
+func (c *compiler) produceNLJoin(p NLJoin, consume func(regs []int)) {
+	// EXERCISE(compile-nl-join): Produce the left child; inside its consume, produce the right
+	// child, so its loop nests inside. With both rows in registers, test the ON predicate (if
+	// any) like a filter and consume the concatenated registers.
+	ls, rs := p.Left.Schema(c.db), p.Right.Schema(c.db)
+	c.produce(p.Left, func(lregs []int) {
+		c.produce(p.Right, func(rregs []int) { // the inner loop is emitted *inside* the outer
+			regs := append(append([]int{}, lregs...), rregs...)
+			if p.Pred == nil {
+				consume(regs)
+				return
+			}
+			r := c.expr(p.Pred, append(append([]string{}, ls...), rs...), regs)
+			skip := c.emit(Instr{Op: "IfNot", P1: r, Comment: "ON " + p.Pred.String()})
+			consume(regs)
+			c.prog.Instrs[skip].P2 = c.here()
+		})
+	})
+	// END EXERCISE
+}
+
+// ---------------------------------------------------------------------------------------------
+// Expressions → register code. Returns the register holding the result.
+// ---------------------------------------------------------------------------------------------
+
+var binOps = map[string]string{
+	"+": "Add", "-": "Sub", "*": "Mul", "/": "Div",
+	"=": "Eq", "!=": "Ne", "<": "Lt", "<=": "Le", ">": "Gt", ">=": "Ge",
+	"and": "And", "or": "Or",
+}
+
+func (c *compiler) expr(e Expr, schema []string, regs []int) int {
+	switch e := e.(type) {
+	case Col:
+		for i, name := range schema {
+			if name == e.Name {
+				return regs[i] // already in a register: no code at all
+			}
+		}
+		panic("unknown column " + e.Name)
+	case Lit:
+		r := c.reg()
+		c.emit(Instr{Op: "Const", P2: r, P4: e.V, Comment: fmt.Sprintf("r[%d]=%s", r, e)})
+		return r
+	case Bin:
+		a, b := c.expr(e.L, schema, regs), c.expr(e.R, schema, regs)
+		r := c.reg()
+		c.emit(Instr{Op: binOps[e.Op], P1: a, P2: b, P3: r, Comment: fmt.Sprintf("r[%d]=r[%d] %s r[%d]", r, a, strings.ToUpper(e.Op), b)})
+		return r
+	case Not:
+		a := c.expr(e.E, schema, regs)
+		r := c.reg()
+		c.emit(Instr{Op: "Not", P1: a, P3: r})
+		return r
+	case IsNull:
+		a := c.expr(e.E, schema, regs)
+		r := c.reg()
+		op := "IsNull"
+		if e.Negate {
+			op = "NotNull"
+		}
+		c.emit(Instr{Op: op, P1: a, P3: r})
+		return r
+	case Func:
+		args := make([]int, len(e.Args))
+		for i, a := range e.Args {
+			args[i] = c.expr(a, schema, regs)
+		}
+		first := c.contiguous(args)
+		r := c.reg()
+		c.emit(Instr{Op: "Func", P1: first, P2: len(args), P3: r, P4: e.Name})
+		return r
+	}
+	panic(fmt.Sprintf("can't compile expression %T", e))
+}
+
+func exprList(es []Expr) string {
+	parts := make([]string, len(es))
+	for i, e := range es {
+		parts[i] = e.String()
+	}
+	return strings.Join(parts, ", ")
+}
+
+func sortList(ks []SortKey) string {
+	parts := make([]string, len(ks))
+	for i, k := range ks {
+		parts[i] = k.E.String()
+		if k.Desc {
+			parts[i] += " DESC"
+		}
+	}
+	return strings.Join(parts, ", ")
+}

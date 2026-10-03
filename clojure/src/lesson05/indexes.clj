@@ -1,0 +1,220 @@
+(ns lesson05.indexes
+  "Lesson 5 — indexes.
+
+  An index is a second copy of one column, kept sorted, that points back at rows. With it:
+
+  - `WHERE customer_id = 7` reads ~height pages to find the matching row ids instead of reading
+    every row (index-scan with lo = hi = 7).
+  - `WHERE day BETWEEN 10 AND 12` descends once, then walks the linked leaves (range scan).
+  - A join can look up each outer row's key in the inner table's index instead of scanning or
+    hashing the inner table: the index nested-loop join. It wins when the outer side is small.
+
+  The tree itself lives in lesson05.btree."
+  (:require [clojure.string :as str]
+            [lesson05.btree :as bt]))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Operators (lesson 2's interface, copied)
+
+(defprotocol Operator
+  (open! [op]) (next! [op]) (close! [op]) (schema [op]))
+
+(defn run [op]
+  (open! op)
+  (try (loop [acc []] (if-let [r (next! op)] (recur (conj acc r)) acc))
+       (finally (close! op))))
+
+(defn- bump [counters k n] (some-> counters (swap! update k (fnil + 0) n)))
+
+(defn scan
+  "Full table scan. Counts :rows-read."
+  [{:keys [columns rows]} alias & [{:keys [counters]}]]
+  (let [pos (volatile! 0)]
+    (reify Operator
+      (open! [_] (vreset! pos 0))
+      (next! [_] (when (< @pos (count rows))
+                   (bump counters :rows-read 1)
+                   (let [r (nth rows @pos)] (vswap! pos inc) r)))
+      (close! [_] nil)
+      (schema [_] (mapv #(str alias "." %) columns)))))
+
+(defn filter-op
+  "Keep rows where (pred row) is exactly true."
+  [child pred]
+  (reify Operator
+    (open! [_] (open! child))
+    (next! [_] (loop [] (when-let [r (next! child)] (if (true? (pred r)) r (recur)))))
+    (close! [_] (close! child))
+    (schema [_] (schema child))))
+
+(defn index-scan
+  "Rows of `table` whose indexed key is in [lo, hi] (inclusive; nil = unbounded), in key order.
+  Reads index pages to find row ids, then fetches only those rows. Counts :index-pages and
+  :rows-read."
+  [{:keys [columns rows]} alias index lo hi & [{:keys [counters]}]]
+  (let [ids (volatile! nil)]
+    (reify Operator
+      (open! [_]
+        (let [{:keys [entries visits]} (bt/range-search index lo hi)]
+          (bump counters :index-pages visits)
+          (vreset! ids (seq (mapcat second entries)))))
+      (next! [_] (when-let [[id & more] @ids]
+                   (vreset! ids more)
+                   (bump counters :rows-read 1)
+                   (nth rows id)))
+      (close! [_] (vreset! ids nil))
+      (schema [_] (mapv #(str alias "." %) columns)))))
+
+(defn index-nl-join
+  "Inner join: for each row of `outer`, compute (outer-key row) and look it up in `index` on the
+  inner table; emit outer ++ inner for every hit. No scan of the inner table at all — each lookup
+  costs ~height page reads plus one fetch per match. Counts :index-pages and :rows-read."
+  [outer {:keys [columns rows]} inner-alias index outer-key & [{:keys [counters]}]]
+  (let [pending (volatile! nil)]
+    (reify Operator
+      (open! [_] (open! outer) (vreset! pending nil))
+      (next! [_]
+        (loop []
+          (if-let [[r & more] @pending]
+            (do (vreset! pending more) r)
+            (when-let [o (next! outer)]
+              (let [k (outer-key o)]
+                (when (some? k)
+                  (let [{:keys [row-ids visits]} (bt/search index k)]
+                    (bump counters :index-pages visits)
+                    (bump counters :rows-read (count row-ids))
+                    (vreset! pending (seq (map #(into o (nth rows %)) row-ids)))))
+                (recur))))))
+      (close! [_] (close! outer))
+      (schema [_] (into (schema outer) (map #(str inner-alias "." %) columns))))))
+
+(defn hash-join
+  "Lesson 3's hash join (build on right), here for comparison. Counts nothing itself; its inputs do."
+  [left right left-key right-key]
+  (let [table (volatile! {}) pending (volatile! nil)]
+    (reify Operator
+      (open! [_]
+        (vreset! table (group-by right-key (remove #(nil? (right-key %)) (run right))))
+        (open! left))
+      (next! [_]
+        (loop []
+          (if-let [[r & more] @pending]
+            (do (vreset! pending more) r)
+            (when-let [l (next! left)]
+              (vreset! pending (seq (map #(into l %) (get @table (left-key l)))))
+              (recur)))))
+      (close! [_] (close! left))
+      (schema [_] (into (schema left) (schema right))))))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Data
+
+(def toy-customers
+  {:columns ["id" "name" "city" "age"]
+   :rows    [[1 "Ada" "Austin" 36] [2 "Bo" "Boston" nil] [3 "Cy" "Austin" 52] [4 "Di" "Denver" 29]]})
+
+(defn lcg [seed]
+  (let [state (volatile! (long seed))]
+    (fn intn [n]
+      (vswap! state #(unchecked-add (unchecked-multiply % 6364136223846793005) 1442695040888963407))
+      (mod (unsigned-bit-shift-right @state 33) n))))
+
+(defn generate
+  "Generated customers and orders from DESIGN.md (products are drawn but not kept)."
+  []
+  (let [intn      (lcg 42)
+        cities    ["Austin" "Boston" "Chicago" "Denver" "Miami" "Oakland" "Portland" "Seattle"]
+        customers (vec (for [id (range 1 201)]
+                         (let [r    (intn 100)
+                               city (cond (< r 40) (cities 0) (< r 60) (cities 1) (< r 72) (cities 2)
+                                          :else (cities (+ 3 (intn 5))))
+                               age  (+ 18 (intn 60))]
+                           [id (str "cust" id) city (if (zero? (mod id 17)) nil age)])))
+        _         (doall (for [_ (range 1 51)] [(intn 5) (intn 9900)]))
+        orders    (vec (for [id (range 1 5001)]
+                         (let [r   (intn 100)
+                               cid (if (< r 50) (+ 1 (intn 20)) (+ 1 (intn 200)))
+                               pid (+ 1 (intn 50))
+                               qty (+ 1 (intn 5))
+                               day (+ 1 (intn 365))]
+                           [id cid pid qty day])))]
+    {:customers {:columns ["id" "name" "city" "age"] :rows customers}
+     :orders    {:columns ["id" "customer_id" "product_id" "qty" "day"] :rows orders}}))
+
+;;; ------------------------------------------------------------------------------------------------
+;;; Demo
+
+(defn- format-value [v] (cond (nil? v) "NULL" (double? v) (format "%.2f" v) :else (str v)))
+
+(defn print-table [columns rows]
+  (let [cells  (cons (vec columns) (map #(mapv format-value %) rows))
+        widths (apply map (fn [& col] (apply max (map count col))) cells)
+        line   (fn [r] (str/join " | " (map (fn [w c] (format (str "%-" w "s") c)) widths r)))]
+    (println (line (first cells)))
+    (println (str/join "-+-" (map #(apply str (repeat % "-")) widths)))
+    (doseq [r (rest cells)] (println (line r)))))
+
+(defn- header [s] (println) (println (str "== " s " " (apply str (repeat (max 0 (- 70 (count s))) "=")))))
+
+(defn- indent [s] (str/join "\n" (map #(str "  " %) (str/split-lines s))))
+
+(defn -main [& _]
+  (header "Growing a B+tree (order 4: at most 3 keys per page)")
+  (let [keys [10 20 30 40 50 60 70 25 35 5 80]]
+    (loop [t (bt/empty-tree 4) [k & more] keys]
+      (when k
+        (let [t' (bt/insert t k k)]
+          (when (or (#{30 70} k) (not= (bt/page-count t) (bt/page-count t')))
+            (println (format "insert %d%s" k (case (- (bt/page-count t') (bt/page-count t))
+                                               0 "" 1 "  → leaf split" "  → leaf split, then the root splits: one level taller")))
+            (println (indent (bt/render t')))
+            (println))
+          (recur t' more))))
+    (println "Leaf splits COPY the first right key up; internal splits MOVE the middle key up.")
+    (println "The tree only grows at the root, so every leaf is at the same depth."))
+
+  (header "An index on customers.id (toy data)")
+  (let [idx (bt/build (:rows toy-customers) 0 3)]
+    (println (indent (bt/render idx)))
+    (println)
+    (println "search id = 3 →" (pr-str (bt/search idx 3)) " (row 2 is Cy)"))
+
+  (let [{:keys [customers orders]} (generate)
+        by-cust (bt/build (:rows orders) 1 32)
+        by-day  (bt/build (:rows orders) 4 32)]
+    (header "orders.customer_id: 5000 rows, order 32")
+    (println (format "  height %d, %d pages, %d distinct keys"
+                     (bt/height by-cust) (bt/page-count by-cust)
+                     (count (:entries (bt/range-search by-cust nil nil)))))
+    (println)
+    (println "WHERE customer_id = 7")
+    (let [full (atom {}) idx (atom {})
+          a (run (filter-op (scan orders "o" {:counters full}) #(= 7 (nth % 1))))
+          b (run (index-scan orders "o" by-cust 7 7 {:counters idx}))]
+      (println (format "  full scan:  %3d rows found, %,5d rows read" (count a) (:rows-read @full)))
+      (println (format "  index scan: %3d rows found, %,5d rows read + %d index pages" (count b) (:rows-read @idx) (:index-pages @idx))))
+    (println)
+    (println "WHERE day BETWEEN 100 AND 102  (index on orders.day)")
+    (let [idx (atom {}) rows (run (index-scan orders "o" by-day 100 102 {:counters idx}))]
+      (println (format "  %d rows, %d index pages: one descent, then sideways along the leaves" (count rows) (:index-pages @idx)))
+      (print-table ["o.id" "o.day"] (map (juxt #(nth % 0) #(nth % 4)) (take 4 rows)))
+      (println "  …"))
+
+    (header "Index nested-loop join vs hash join")
+    (println "customers WHERE city = 'Seattle'  ⋈  orders ON orders.customer_id = customers.id")
+    (let [seattle? #(= "Seattle" (nth % 2))
+          hj (atom {}) ij (atom {})
+          h  (run (hash-join (filter-op (scan customers "c" {:counters hj}) seattle?)
+                             (scan orders "o" {:counters hj}) #(nth % 0) #(nth % 1)))
+          i  (run (index-nl-join (filter-op (scan customers "c" {:counters ij}) seattle?)
+                                 orders "o" by-cust #(nth % 0) {:counters ij}))]
+      (println (format "  hash join:     %3d rows; read %,d rows (all customers + all orders to build)"
+                       (count h) (:rows-read @hj)))
+      (println (format "  index NL join: %3d rows; read %,d rows + %d index pages"
+                       (count i) (:rows-read @ij) (:index-pages @ij)))
+      (println (format "  same result? %s" (= (set h) (set i))))
+      (println)
+      (println (format "  The outer side is small (%d Seattle customers → %d lookups), so index lookups beat"
+                       (count (filter seattle? (:rows customers))) (count (filter seattle? (:rows customers)))))
+      (println "  hashing all 5000 orders. With 2000 outer rows the lookups would cost more than the")
+      (println "  hash build — which one to use depends on row counts, which is lesson 6."))))

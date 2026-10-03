@@ -1,0 +1,12 @@
+{:paths ["src"]
+ :deps  {org.clojure/clojure {:mvn/version "1.12.1"}}
+ :aliases
+ {:dev  {:extra-paths ["test" "ex"]}
+  :test {:extra-paths ["test"]
+         :extra-deps  {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :main-opts   ["-m" "cognitect.test-runner"]
+         :exec-fn     cognitect.test-runner.api/test}
+  ;; the exercise track: clojure -M:ex -d ex [-n exercises.lesson03.joins-test]
+  :ex   {:extra-paths ["ex"]
+         :extra-deps  {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :main-opts   ["-m" "cognitect.test-runner"]}}}
