@@ -288,14 +288,22 @@
   // Recall cards. Each post's cards live in assets/cards/NN.js as:
   //   EE.addCards("03", [ { "id": "03-build-side", "q": "…", "a": "…" }, … ]);
   // (strict JSON inside the array, so tools/cards_to_anki.py can read it). q/a may contain HTML.
+  // Where common.js was loaded from, and its ?v= cache-busting stamp (added at deploy time by
+  // tools/stamp_assets.py), so files it loads itself get the same stamp.
+  function assetBase() {
+    const src = document.querySelector('script[src*="common.js"]').getAttribute("src");
+    const m = src.match(/^(.*)common\.js(\?.*)?$/);
+    return { base: m[1], query: m[2] || "" };
+  }
+
   const CARDS = {};
   function addCards(part, cards) { CARDS[part] = cards.map((c) => ({ ...c, part })); }
 
   function loadCards(part, cb) {
     if (CARDS[part]) return cb(CARDS[part]);
-    const base = document.querySelector('script[src$="common.js"]').getAttribute("src").replace(/common\.js$/, "");
+    const { base, query } = assetBase();
     const s = document.createElement("script");
-    s.src = `${base}cards/${part}.js`;
+    s.src = `${base}cards/${part}.js${query}`;
     s.onload = () => cb(CARDS[part] || []);
     s.onerror = () => cb([]);
     document.head.appendChild(s);
@@ -348,9 +356,9 @@
   function addWild(part, entries) { WILD[part] = entries.map((e) => ({ ...e, part })); }
   function loadWild(part, cb) {
     if (WILD[part]) return cb(WILD[part]);
-    const base = document.querySelector('script[src$="common.js"]').getAttribute("src").replace(/common\.js$/, "");
+    const { base, query } = assetBase();
     const s = document.createElement("script");
-    s.src = `${base}wild/${part}.js`;
+    s.src = `${base}wild/${part}.js${query}`;
     s.onload = () => cb(WILD[part] || []);
     s.onerror = () => cb([]);
     document.head.appendChild(s);

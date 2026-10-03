@@ -25,12 +25,15 @@ jobs:
         with: { go-version-file: go/go.mod, cache-dependency-path: go/go.mod }
       - uses: actions/setup-node@v7.0.0
         with: { node-version: "22", cache: npm, cache-dependency-path: tools/check-site/package-lock.json }
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: build Go → WebAssembly
         run: tools/build_wasm.sh
       - name: check the site, terminal included (don't deploy a broken site)
         working-directory: tools/check-site
         env: { REQUIRE_WASM: "1" }
         run: npm ci && node check.mjs
+      - name: cache-bust asset references (Pages caches for 10 minutes)
+        run: uv run tools/stamp_assets.py "${GITHUB_SHA::7}"
       - uses: actions/configure-pages@v6.0.0
       - uses: actions/upload-pages-artifact@v5.0.0
         with: { path: docs }
