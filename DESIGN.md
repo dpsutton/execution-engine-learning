@@ -11,7 +11,7 @@ execution-engine/
   README.md                 overview + reading list
   DESIGN.md                 this file
   queries/golden.sql        golden queries (one per line, `--` comments)
-  site/                     static site, open site/index.html directly (file:// must work)
+  docs/                     static site (GitHub Pages serves /docs), open docs/index.html directly (file:// must work)
     index.html
     posts/01-expressions.html … 07-bytecode.html
     assets/style.css  assets/common.js  assets/viz/NN-*.js
@@ -311,7 +311,7 @@ Exercise ids: kebab-case, unique per lesson, same id in Go and Clojure for the s
 **Predict-then-reveal**: `EE.predict(mount, {prompt, number|choices, answer, explain, onLock})` in
 `common.js`. 1–2 per post, on misconceptions; the figure runs after the guess is locked.
 
-**Cards**: `site/assets/cards/NN.js` = `EE.addCards("NN", [ …strict JSON… ])`, each
+**Cards**: `docs/assets/cards/NN.js` = `EE.addCards("NN", [ …strict JSON… ])`, each
 `{"id": "NN-slug", "q": html, "a": html, "warmup": true?}`. 8–12 per post; test mechanisms and
 reasons, not trivia; answers 1–3 sentences. Mark 3 `"warmup": true` (they open the next post).
 Posts include `<div data-warmup></div>` right after the dek, and a `.build-it` callout naming the

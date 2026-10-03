@@ -821,7 +821,7 @@ SCENES.outro = {
     for (let i = 0; i < 16; i++) { const b = h("div", "", v1); b.style.cssText += `position:absolute;bottom:0;width:18px;left:${i * 27}px;border-radius:4px 4px 0 0;background:${C.accent}`; minis.push(b); }
     cards[1].querySelector(".viz").innerHTML = `<div class="mono" style="font-size:20px;line-height:1.7;color:${C.soft}"><span style="color:${C.teal}">$</span> go run ./cmd/engine<br><span style="color:${C.teal}">$</span> clojure -M -m engine.main</div>`;
     const steps = ["01", "02", "03", "04", "05", "06", "07"].map((n, i) => { const e = h("div", "mono", cards[2].querySelector(".viz"), n); e.style.cssText += `position:absolute;left:${i * 61}px;bottom:10px;width:50px;height:40px;line-height:40px;text-align:center;border-radius:8px;font-size:18px;font-weight:700;background:rgba(169,147,240,.15);color:${C.violet}`; return e; });
-    const cta = h("div", "abs", root, `site/index.html &nbsp;→&nbsp; <span style="color:${C.text}">Part 1 · Expressions</span>`); cta.style.cssText += `font:500 30px/1 Inter;color:${C.soft}`;
+    const cta = h("div", "abs", root, `docs/index.html &nbsp;→&nbsp; <span style="color:${C.text}">Part 1 · Expressions</span>`); cta.style.cssText += `font:500 30px/1 Inter;color:${C.soft}`;
     return { title, sub, cards, minis, steps, cta };
   },
   update(st, t, S) {

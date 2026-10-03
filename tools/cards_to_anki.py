@@ -1,7 +1,7 @@
 # /// script
 # dependencies = ["genanki"]
 # ///
-"""Export site/assets/cards/*.js to an Anki deck: execution-engine.apkg (one subdeck per part)."""
+"""Export docs/assets/cards/*.js to an Anki deck: execution-engine.apkg (one subdeck per part)."""
 import json, re, hashlib
 from pathlib import Path
 import genanki
@@ -14,7 +14,7 @@ model = genanki.Model(1607392319, "Execution Engine card",
     css=".card{font-family:-apple-system,sans-serif;font-size:18px;text-align:left;max-width:40em;margin:auto}"
         ".part{font-size:12px;color:#999;text-transform:uppercase;letter-spacing:.1em}code{font-family:Menlo,monospace}")
 decks = []
-for f in sorted((ROOT / "site/assets/cards").glob("[0-9][0-9].js")):
+for f in sorted((ROOT / "docs/assets/cards").glob("[0-9][0-9].js")):
     part = f.stem
     m = re.search(r"EE\.addCards\(\s*\"\d\d\"\s*,\s*(\[.*\])\s*\)\s*;?\s*$", f.read_text(), re.S)
     cards = json.loads(m.group(1))

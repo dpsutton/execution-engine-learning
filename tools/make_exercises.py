@@ -134,12 +134,14 @@ def write_index(index):
           "```", ""]
     for n in sorted(by):
         post = POSTS[n]
-        md += [f"## Part {int(n)} · [{post.split('-', 1)[1].title()}](site/posts/{post}.html)", ""]
+        md += [f"## Part {int(n)} · [{post.split('-', 1)[1].title()}](docs/posts/{post}.html)", ""]
         for e in by[n]:
             md.append(f"- **`{e['id']}`** ({e['lang']}, `{e['file']}`, {e['lines']} lines): {e['hint']}")
         md.append("")
     (ROOT / "EXERCISES.md").write_text("\n".join(md))
-    (ROOT / "site/assets/exercises.js").write_text("window.EE_EXERCISES = " + json.dumps(index, indent=1) + ";\n")
+    # The site links to its own copy (GitHub Pages renders it; it can't reach files outside docs/).
+    (ROOT / "docs/EXERCISES.md").write_text("\n".join(md).replace("](docs/posts/", "](posts/"))
+    (ROOT / "docs/assets/exercises.js").write_text("window.EE_EXERCISES = " + json.dumps(index, indent=1) + ";\n")
 
 
 def check(index):

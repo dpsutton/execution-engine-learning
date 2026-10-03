@@ -7,7 +7,8 @@ and to work up to a planner driven by statistics and a resumable bytecode VM lik
 
 ## Read
 
-Open `site/index.html` in a browser (it works straight from `file://`). Seven posts, each with
+Open `docs/index.html` in a browser (it works straight from `file://`; no build step). On GitHub,
+Pages can serve it as-is: Settings → Pages → deploy from branch, folder `/docs`. Seven posts, each with
 pseudocode and interactive figures:
 
 1. **Expressions**: rows, values, tree-walking evaluation, three-valued logic, closure compilation
@@ -46,7 +47,7 @@ but nothing depends on it).
 ```
 DESIGN.md          the shared contract: values, semantics, dataset, operators, VM instruction set
 queries/           golden queries
-site/              the blog posts (static HTML, vanilla JS figures)
+docs/              the blog posts (static HTML, vanilla JS figures)
 go/                lessonNN/ standalone lessons, engine/ integrated, cmd/
 clojure/           src/lessonNN/ standalone lessons, src/engine/ integrated
 ```
