@@ -30,6 +30,7 @@ func rowsString(rows []Row) string {
 }
 
 func TestToyQuery(t *testing.T) {
+	defer lkTodoGuard(t)
 	db := ToyDB()
 	got := rowsString(NewVM(Compile(topCustomers(), db), db).Run())
 	want := "Cy | 5\nAda | 3\n"
@@ -41,6 +42,7 @@ func TestToyQuery(t *testing.T) {
 // Stop after every single instruction, serialize, deserialize into a brand-new VM, continue.
 // The result must be identical to an uninterrupted run.
 func TestSnapshotAfterEveryInstruction(t *testing.T) {
+	defer lkTodoGuard(t)
 	for _, plan := range []Plan{topCustomers(), cityCounts()} {
 		for _, db := range []DB{ToyDB(), GeneratedDB()} {
 			if _, ok := db["customers"]; !ok {
@@ -89,6 +91,7 @@ func cityCounts() Plan {
 }
 
 func TestGeneratedAggregateMatchesLoops(t *testing.T) {
+	defer lkTodoGuard(t)
 	db := GeneratedDB()
 	rows := NewVM(Compile(cityCounts(), db), db).Run()
 	city := map[int64]string{}
@@ -113,6 +116,7 @@ func TestGeneratedAggregateMatchesLoops(t *testing.T) {
 }
 
 func TestNLJoinAndExpressions(t *testing.T) {
+	defer lkTodoGuard(t)
 	db := ToyDB()
 	plan := Project{
 		Names: []string{"name", "pname", "total", "big"},
@@ -130,6 +134,7 @@ func TestNLJoinAndExpressions(t *testing.T) {
 }
 
 func TestEmptyAggregateAndLimitZero(t *testing.T) {
+	defer lkTodoGuard(t)
 	db := ToyDB()
 	empty := Aggregate{Aggs: []AggCall{{Fn: "count"}, {Fn: "sum", Arg: C("customers.age")}}, Names: []string{"n", "s"},
 		Child: Filter{Child: Scan{Table: "customers"}, Pred: B(">", C("customers.age"), L(100))}}

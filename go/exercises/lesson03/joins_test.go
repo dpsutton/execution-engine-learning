@@ -32,6 +32,7 @@ func threeWays(c, o *Table) (nl, hash, merge []Row) {
 }
 
 func TestJoinsAgree(t *testing.T) {
+	defer lkTodoGuard(t)
 	gc, _, gorders := Generate()
 	for _, tables := range [][2]*Table{{ToyCustomers, ToyOrders}, {gc, gorders}} {
 		nl, hash, merge := threeWays(tables[0], tables[1])
@@ -48,6 +49,7 @@ func TestJoinsAgree(t *testing.T) {
 }
 
 func TestToyInnerJoin(t *testing.T) {
+	defer lkTodoGuard(t)
 	_, hash, _ := threeWays(ToyCustomers, ToyOrders)
 	if len(hash) != 4 { // Ada×2, Cy, Di; Bo has none, order 14's customer doesn't exist
 		t.Fatalf("got %d rows", len(hash))
@@ -55,6 +57,7 @@ func TestToyInnerJoin(t *testing.T) {
 }
 
 func TestLeftOuter(t *testing.T) {
+	defer lkTodoGuard(t)
 	// customers LEFT JOIN orders: Bo appears once, padded with NULLs.
 	rows := Collect(&HashJoin{Left: &Scan{T: ToyCustomers}, Right: &Scan{T: ToyOrders}, LeftKey: 0, RightKey: 1, Kind: LeftOuter})
 	nlRows := Collect(&NLJoin{Left: &Scan{T: ToyCustomers}, Right: &Scan{T: ToyOrders}, Pred: eqPred(0, 5), Kind: LeftOuter})
@@ -74,6 +77,7 @@ func TestLeftOuter(t *testing.T) {
 }
 
 func TestGeneratorMatchesSpec(t *testing.T) {
+	defer lkTodoGuard(t)
 	c, p, o := Generate()
 	if len(c.Rows) != 200 || len(p.Rows) != 50 || len(o.Rows) != 5000 {
 		t.Fatal("wrong table sizes")

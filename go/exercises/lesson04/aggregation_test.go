@@ -32,6 +32,7 @@ func equal(t *testing.T, what string, a, b []string) {
 }
 
 func TestHashAndSortAggregateAgree(t *testing.T) {
+	defer lkTodoGuard(t)
 	_, _, orders := Generate()
 	aggs := []AggSpec{{"count", -1}, {"sum", 3}, {"min", 4}, {"max", 4}, {"avg", 3}}
 	hash := Collect(&HashAggregate{Child: &Scan{T: orders}, GroupBy: []int{1}, Aggs: aggs})
@@ -40,6 +41,7 @@ func TestHashAndSortAggregateAgree(t *testing.T) {
 }
 
 func TestAggregateSemantics(t *testing.T) {
+	defer lkTodoGuard(t)
 	// No GROUP BY over empty input: one row, count = 0, sum = NULL.
 	empty := &Table{Cols: []string{"x"}}
 	for _, op := range []Operator{
@@ -59,6 +61,7 @@ func TestAggregateSemantics(t *testing.T) {
 }
 
 func TestExternalSortMatchesSort(t *testing.T) {
+	defer lkTodoGuard(t)
 	_, _, orders := Generate()
 	keys := []SortKey{{Col: 4, Desc: true}, {Col: 3}}
 	want := rowsAsStrings(Collect(&Sort{Child: &Scan{T: orders}, Keys: keys}), false)
@@ -71,6 +74,7 @@ func TestExternalSortMatchesSort(t *testing.T) {
 }
 
 func TestTopN(t *testing.T) {
+	defer lkTodoGuard(t)
 	_, _, orders := Generate()
 	keys := []SortKey{{Col: 3, Desc: true}, {Col: 4}}
 	all := rowsAsStrings(Collect(&Sort{Child: &Scan{T: orders}, Keys: keys}), false)
@@ -79,6 +83,7 @@ func TestTopN(t *testing.T) {
 }
 
 func TestNullsSortLast(t *testing.T) {
+	defer lkTodoGuard(t)
 	tbl := &Table{Cols: []string{"x"}, Rows: []Row{{nil}, {int64(2)}, {int64(1)}}}
 	for _, desc := range []bool{false, true} {
 		rows := Collect(&Sort{Child: &Scan{T: tbl}, Keys: []SortKey{{Col: 0, Desc: desc}}})

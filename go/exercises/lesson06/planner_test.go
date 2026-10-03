@@ -9,6 +9,7 @@ import (
 )
 
 func TestAnalyze(t *testing.T) {
+	defer lkTodoGuard(t)
 	cat := NewCatalog()
 	age := cat.Stats["customers"].Cols["customers.age"]
 	if age.Nulls != 11 || age.Rows != 200 { // ids divisible by 17: 17, 34, …, 187
@@ -27,6 +28,7 @@ func TestAnalyze(t *testing.T) {
 }
 
 func TestRangeSelectivityUsesHistogram(t *testing.T) {
+	defer lkTodoGuard(t)
 	cat := NewCatalog()
 	// The skew: half of orders go to customers 1..20. A min/max-only estimate would say ~10%.
 	p := B("<=", C("orders.customer_id"), L(20))
@@ -61,6 +63,7 @@ func bruteForce(cat *Catalog) int {
 }
 
 func TestPlanReturnsCorrectRows(t *testing.T) {
+	defer lkTodoGuard(t)
 	cat := NewCatalog()
 	q := Query{Tables: []string{"orders", "customers", "products"}, Where: []Expr{
 		B("=", C("orders.customer_id"), C("customers.id")),
@@ -82,6 +85,7 @@ func TestPlanReturnsCorrectRows(t *testing.T) {
 }
 
 func TestPointLookupUsesIndex(t *testing.T) {
+	defer lkTodoGuard(t)
 	cat := NewCatalog()
 	_, plan := cat.Plan(Query{Tables: []string{"orders"}, Where: []Expr{B("=", C("orders.customer_id"), L(7))}})
 	if plan.Op != "IndexScan" {
@@ -94,6 +98,7 @@ func TestPointLookupUsesIndex(t *testing.T) {
 }
 
 func TestEqSelectivityAssumesUniformity(t *testing.T) {
+	defer lkTodoGuard(t)
 	cat := NewCatalog()
 	// 8 cities, no NULLs: every city is guessed at 1/8 of 200 customers, whatever the truth.
 	if est := cat.Selectivity(B("=", C("customers.city"), L("Austin"))) * 200; math.Abs(est-25) > 1e-9 {
@@ -111,6 +116,7 @@ func TestEqSelectivityAssumesUniformity(t *testing.T) {
 }
 
 func TestJoinCardinality(t *testing.T) {
+	defer lkTodoGuard(t)
 	cat := NewCatalog()
 	// |customers|·|orders| / max(ndv(customers.id)=200, ndv(orders.customer_id)=200) = 5000
 	est := cat.Selectivity(B("=", C("orders.customer_id"), C("customers.id"))) * 200 * 5000

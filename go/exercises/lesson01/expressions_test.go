@@ -6,6 +6,7 @@ package lesson01
 import "testing"
 
 func TestThreeValuedLogic(t *testing.T) {
+	defer lkTodoGuard(t)
 	cases := []struct {
 		op   string
 		a, b Value
@@ -35,6 +36,7 @@ func TestThreeValuedLogic(t *testing.T) {
 }
 
 func TestEvalAndCompileAgree(t *testing.T) {
+	defer lkTodoGuard(t)
 	exprs := []Expr{
 		Bin{"and", Bin{">", Col{"age"}, Lit{int64(30)}}, Bin{"=", Col{"city"}, Lit{"Austin"}}},
 		Bin{"or", Bin{">", Col{"age"}, Lit{int64(30)}}, Bin{"=", Col{"name"}, Lit{"Bo"}}},
@@ -54,6 +56,7 @@ func TestEvalAndCompileAgree(t *testing.T) {
 }
 
 func TestArithmetic(t *testing.T) {
+	defer lkTodoGuard(t)
 	if v := ApplyBinary("+", int64(2), int64(3)); v != int64(5) {
 		t.Errorf("int+int = %v", v)
 	}
@@ -72,6 +75,7 @@ func TestArithmetic(t *testing.T) {
 }
 
 func TestPasses(t *testing.T) {
+	defer lkTodoGuard(t)
 	if Passes(nil) || Passes(false) || !Passes(true) {
 		t.Error("only exactly-true passes a filter")
 	}
@@ -80,6 +84,7 @@ func TestPasses(t *testing.T) {
 // AND/OR must not evaluate the right side once the left decides the answer. The right side here
 // would panic (comparing a string to a number), so evaluating it fails the test.
 func TestShortCircuit(t *testing.T) {
+	defer lkTodoGuard(t)
 	boom := Bin{"<", Lit{"a"}, Lit{int64(1)}}
 	cases := []struct {
 		e    Expr

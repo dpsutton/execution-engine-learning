@@ -10,6 +10,7 @@ func ageOver(n int64) func(Row) bool {
 }
 
 func TestFilterProject(t *testing.T) {
+	defer lkTodoGuard(t)
 	scan := &Scan{Table: "customers", Cols: CustomersSchema, Rows: Customers}
 	plan := &Project{
 		Child: &Filter{Child: scan, Pred: ageOver(30)},
@@ -23,6 +24,7 @@ func TestFilterProject(t *testing.T) {
 }
 
 func TestLimitStopsPulling(t *testing.T) {
+	defer lkTodoGuard(t)
 	scan := &Scan{Table: "customers", Cols: CustomersSchema, Rows: Customers}
 	rows := Collect(&Limit{Child: scan, N: 1})
 	if len(rows) != 1 {
@@ -34,6 +36,7 @@ func TestLimitStopsPulling(t *testing.T) {
 }
 
 func TestOperatorsAreReopenable(t *testing.T) {
+	defer lkTodoGuard(t)
 	plan := &Limit{Child: &Scan{Cols: CustomersSchema, Rows: Customers}, N: 3}
 	if a, b := len(Collect(plan)), len(Collect(plan)); a != 3 || b != 3 {
 		t.Fatalf("second run gave %d rows, want 3", b)

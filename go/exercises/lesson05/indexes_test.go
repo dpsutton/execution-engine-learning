@@ -9,6 +9,7 @@ import (
 )
 
 func TestBPlusTreeSearchAndRange(t *testing.T) {
+	defer lkTodoGuard(t)
 	for _, order := range []int{3, 4, 5, 32} {
 		tree := NewBPlusTree(order)
 		// insert 1..500 in a scrambled order, each key twice
@@ -35,6 +36,7 @@ func TestBPlusTreeSearchAndRange(t *testing.T) {
 }
 
 func TestTreeStaysShallow(t *testing.T) {
+	defer lkTodoGuard(t)
 	tree := NewBPlusTree(32)
 	for i := 0; i < 100_000; i++ {
 		tree.Insert(int64(i), i)
@@ -45,6 +47,7 @@ func TestTreeStaysShallow(t *testing.T) {
 }
 
 func TestIndexScanMatchesFilter(t *testing.T) {
+	defer lkTodoGuard(t)
 	_, _, orders := Generate()
 	idx := BuildIndex(orders, 1, 32)
 	want := Collect(&Filter{Child: &Scan{T: orders}, Pred: func(r Row) bool { return r[1] == int64(7) }})
@@ -60,6 +63,7 @@ func TestIndexScanMatchesFilter(t *testing.T) {
 }
 
 func TestIndexNLJoin(t *testing.T) {
+	defer lkTodoGuard(t)
 	customers, _, orders := Generate()
 	idx := BuildIndex(orders, 1, 32)
 	rows := Collect(&IndexNLJoin{Outer: &Scan{T: customers}, OuterKey: 0, Inner: orders, Index: idx})
