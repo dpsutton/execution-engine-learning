@@ -312,3 +312,17 @@ pre.src code { display: block; }
 
 /* verbatim source and code: show characters as typed (no -> or == ligatures) */
 pre.src, pre code, code { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
+
+/* ---------- syntax highlighting (highlight.js classes, site palette) ---------- */
+.nav-link { color: var(--ink-soft); text-decoration: none; }
+.nav-link:hover { color: var(--ink); }
+.hljs-keyword, .hljs-selector-tag, .hljs-meta .hljs-keyword { color: var(--accent); }
+.hljs-built_in, .hljs-type, .hljs-class .hljs-title, .hljs-title.class_ { color: var(--teal); }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--ink); font-weight: 600; }
+.hljs-string, .hljs-symbol, .hljs-regexp, .hljs-char.escape_ { color: var(--violet); }
+.hljs-number, .hljs-literal { color: var(--teal); }
+.hljs-comment, .hljs-quote { color: var(--ink-faint); font-style: italic; }
+.hljs-meta, .hljs-meta .hljs-string { color: var(--ink-faint); }
+.hljs-attr, .hljs-variable, .hljs-template-variable, .hljs-params { color: var(--ink); }
+.hljs-name { color: var(--accent); }
+.hljs-subst { color: var(--ink); }

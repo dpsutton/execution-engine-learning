@@ -343,8 +343,52 @@
     if (!bar || document.querySelector(".topbar a.review-link")) return;
     const up = /\/posts\//.test(location.pathname) ? "../" : "";
     const due = (() => { const s = store.get("ee-sr", {}); const d = Math.floor((Date.now() - new Date().getTimezoneOffset() * 60000) / 86400000); return Object.values(s).filter((x) => x.due <= d).length; })();
-    bar.after(el("a", { class: "review-link", href: up + "review.html", text: due ? `Review · ${due} due` : "Review" }));
+    bar.after(
+      el("a", { class: "nav-link", href: up + "terminal.html", text: "Terminal" }),
+      el("a", { class: "nav-link", href: up + "wild.html", text: "In the wild" }),
+      el("a", { class: "review-link", href: up + "review.html", text: due ? `Review · ${due} due` : "Review" }));
   }
+  // ------------------------------------------------------------------------------------------
+  // Syntax highlighting: highlight.js from cdnjs (common bundle + clojure + scala), colored by
+  // style.css with the site's palette. Plain blocks opt in with <code class="language-X">;
+  // "In the wild" excerpts are highlighted per line (see highlightLines). Without the network,
+  // code just stays uncolored.
+  // ------------------------------------------------------------------------------------------
+  const HLJS = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.2/";
+  let hljsReady = null;
+  function loadHljs() {
+    if (hljsReady) return hljsReady;
+    const add = (src) => new Promise((resolve, reject) => {
+      const s = document.createElement("script"); s.src = src; s.onload = resolve; s.onerror = reject;
+      document.head.appendChild(s);
+    });
+    hljsReady = add(HLJS + "highlight.min.js")
+      .then(() => Promise.all(["clojure", "scala"].map((l) => add(`${HLJS}languages/${l}.min.js`))))
+      .then(() => window.hljs, () => null);
+    return hljsReady;
+  }
+  function highlightBlocks(root = document) {
+    const blocks = root.querySelectorAll('pre code[class*="language-"]:not(.hljs)');
+    if (!blocks.length) return;
+    loadHljs().then((hljs) => hljs && blocks.forEach((b) => hljs.highlightElement(b)));
+  }
+  // Highlight a whole snippet, then split the HTML into lines, closing any span still open at the
+  // end of a line and reopening it on the next (a block comment spans many lines).
+  function highlightLines(hljs, code, lang) {
+    if (!hljs || !hljs.getLanguage(lang)) return null;
+    const html = hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
+    const out = []; let open = [];
+    for (const line of html.split("\n")) {
+      let cur = open.join("");
+      for (const m of line.matchAll(/<span[^>]*>|<\/span>/g)) {
+        if (m[0] === "</span>") open.pop(); else open.push(m[0]);
+      }
+      cur += line + "</span>".repeat(open.length);
+      out.push(cur);
+    }
+    return out;
+  }
+
   // ------------------------------------------------------------------------------------------
   // "In the wild": verbatim excerpts from real engines, pinned to a commit.
   // assets/wild/NN.js = EE.addWild("NN", [ …strict JSON… ]); each entry:
@@ -370,11 +414,17 @@
       const width = String(seg.end).length;
       return el("div", { class: "src-seg" },
         i > 0 ? el("div", { class: "src-gap", text: "⋮" }) : null,
-        el("pre", { class: "src" }, el("code", null, lines.map((l, j) =>
-          el("span", { class: "src-line" }, el("span", { class: "src-ln", text: String(seg.start + j).padStart(width) }), l.replace(/\t/g, "    ") + "\n")))));
+        el("pre", { class: "src" }, el("code", { "data-lang": e.lang }, lines.map((l, j) => {
+          const text = el("span", { class: "src-text" }, l.replace(/\t/g, "    "));
+          return el("span", { class: "src-line" }, el("span", { class: "src-ln", text: String(seg.start + j).padStart(width) }), text, "\n");
+        }))));
     });
     const seg0 = e.segments[0], segN = e.segments[e.segments.length - 1];
     const link = `https://github.com/${e.repo}/blob/${e.sha}/${e.path}#L${seg0.start}-L${segN.end}`;
+    loadHljs().then((hljs) => code.forEach((segEl, i) => {
+      const lines = highlightLines(hljs, e.segments[i].code.replace(/\t/g, "    "), e.lang);
+      if (lines) segEl.querySelectorAll(".src-text").forEach((t, j) => { t.innerHTML = lines[j]; });
+    }));
     return el("section", { class: "wild-card", id: e.id },
       el("div", { class: "wild-head" },
         el("span", { class: "wild-engine", text: e.engine }),
@@ -403,8 +453,8 @@
     });
   }
 
-  document.addEventListener("DOMContentLoaded", () => { markRead(); initWarmup(); initTopbarLinks(); initWild(); });
+  document.addEventListener("DOMContentLoaded", () => { markRead(); initWarmup(); initTopbarLinks(); initWild(); highlightBlocks(); });
 
   window.EE = { el, svg, clear, fmt, cell, table, frame, stepper, seg, highlightPseudo, PARTS, TOY, lcg,
-    predict, addCards, loadCards, CARDS, store, flipCard, addWild, loadWild, WILD, wildCard, permalink };
+    predict, addCards, loadCards, CARDS, store, flipCard, addWild, loadWild, WILD, wildCard, permalink, highlightBlocks };
 })();

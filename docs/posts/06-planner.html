@@ -32,7 +32,7 @@
 
   <p>Here is a three-table query over the generated dataset:</p>
 
-<pre><code>SELECT c.city, sum(o.qty * p.price)
+<pre><code class="language-sql">SELECT c.city, sum(o.qty * p.price)
 FROM customers c, orders o, products p
 WHERE o.customer_id = c.id AND o.product_id = p.id AND c.city = 'Seattle'
 GROUP BY c.city</code></pre>
@@ -277,7 +277,7 @@ total(plan)                = sum over every operator
 
   <div class="build-it"><p>Write the estimator and the search: equality and range selectivity from stats and histograms, equi-join cardinality, and the DP over subsets that picks a join order. The exercise track for this part (<code>eq-selectivity</code>, <code>range-selectivity</code>, <code>join-cardinality</code>, <code>join-order-dp</code>)
     strips those function bodies out of the lesson and leaves the tests. Fill them in until the tests pass:</p>
-<pre><code>cd go &amp;&amp; go test ./exercises/lesson06/
+<pre><code class="language-bash">cd go &amp;&amp; go test ./exercises/lesson06/
 cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson06.planner-test</code></pre>
     <p>Hints and the full list are in <a href="../exercises.html">the exercises page</a>.</p></div>
 

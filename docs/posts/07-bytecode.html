@@ -334,14 +334,14 @@ state: 6 host stack frames, locals
     </div>
     <div>
       <h4>VM, paused at the same moment</h4>
-<pre>{ "pc": 5,
+<pre><code class="language-json">{ "pc": 5,
   "regs": {"1":2,"2":12,"3":1,"4":101,
            "5":1,"14":1},
   "cursors": {"0":{"table":"orders",
                    "pos":2}},
   "hashTables": {"0":{"buckets":{
      "1":[[10,1,100,2],[11,1,101,1]]}}},
-  "halted": false }</pre>
+  "halted": false }</code></pre>
     </div>
   </div>
 
@@ -450,7 +450,7 @@ state: 6 host stack frames, locals
 
   <div class="build-it"><p>Write the machine and the compiler: the fetch/dispatch loop with fuel, <code>ResultRow</code>'s yield-and-resume, and the produce/consume code generation for a Filter and a nested-loop join. The exercise track for this part (<code>vm-step-loop</code>, <code>compile-filter</code>, <code>compile-nl-join</code>, plus <code>vm-cursor-ops</code> in Go and <code>vm-result-row</code> in Clojure)
     strips those function bodies out of the lesson and leaves the tests. Fill them in until the tests pass:</p>
-<pre><code>cd go &amp;&amp; go test ./exercises/lesson07/
+<pre><code class="language-bash">cd go &amp;&amp; go test ./exercises/lesson07/
 cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson07.bytecode-test</code></pre>
     <p>Hints and the full list are in <a href="../exercises.html">the exercises page</a>.</p></div>
 

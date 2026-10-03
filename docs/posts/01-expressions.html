@@ -98,7 +98,7 @@
     <code>Lit{V}</code>, <code>Bin{Op, L, R}</code>, <code>Not{E}</code>,
     <code>IsNull{E}</code>, and <code>Func{Name, Args}</code>. In Clojure we use plain vectors:</p>
 
-<pre><code>[:and [:&gt; [:+ [:col "customers.age"] [:lit 10]] [:lit 40]]
+<pre><code class="language-clojure">[:and [:&gt; [:+ [:col "customers.age"] [:lit 10]] [:lit 40]]
       [:= [:col "customers.city"] [:lit "Austin"]]]</code></pre>
 
   <p>That's the whole data model: an expression is data describing a computation. What remains is
@@ -234,7 +234,7 @@ function passes(predicate, row)
 
   <p>In Clojure this is especially natural, since <code>compile</code> returns <code>fn</code>s:</p>
 
-<pre><code>(defn compile-expr [expr schema]
+<pre><code class="language-clojure">(defn compile-expr [expr schema]
   (case (first expr)
     :col (let [i (.indexOf ^java.util.List schema (second expr))]
            (fn [row] (nth row i)))

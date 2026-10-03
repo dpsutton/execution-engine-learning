@@ -53,7 +53,7 @@
     with a runnable demo. The integrated engine in <code>go/engine</code> and
     <code>clojure/src/engine</code> puts everything together: SQL text in, a parser, a planner that reads
     statistics, and two executors (iterators or bytecode) that must agree.</p>
-<pre><code>cd go &amp;&amp; go run ./cmd/engine
+<pre><code class="language-bash">cd go &amp;&amp; go run ./cmd/engine
 cd clojure &amp;&amp; clojure -M -m engine.main</code></pre>
   <p>Or skip the install: the <a href="terminal.html">terminal</a> runs the Go engine and every lesson
     demo in your browser, compiled to WebAssembly.</p>
