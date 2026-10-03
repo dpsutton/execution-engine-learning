@@ -27,10 +27,22 @@ func compileExpr(e Expr, schema []string) compiled {
 		l, r := compileExpr(x.L, schema), compileExpr(x.R, schema)
 		op := x.Op
 		switch op {
-		case "and":
-			return func(row []Value) Value { return And3(l(row), r(row)) }
-		case "or":
-			return func(row []Value) Value { return Or3(l(row), r(row)) }
+		case "and": // short-circuit: FALSE AND anything is FALSE
+			return func(row []Value) Value {
+				if a := l(row); a == false {
+					return a
+				} else {
+					return And3(a, r(row))
+				}
+			}
+		case "or": // TRUE OR anything is TRUE
+			return func(row []Value) Value {
+				if a := l(row); a == true {
+					return a
+				} else {
+					return Or3(a, r(row))
+				}
+			}
 		case "+", "-", "*", "/":
 			return func(row []Value) Value { return Arith(op, l(row), r(row)) }
 		}

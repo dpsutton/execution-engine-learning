@@ -12,8 +12,8 @@ cd clojure && clojure -M:ex -d ex -n exercises.lesson03.joins-test   # Clojure
 
 ## Part 1 · [Expressions](site/posts/01-expressions.html)
 
-- **`eval-binary`** (Go, `go/exercises/lesson01/expressions.go`, 5 lines): Evaluate both sides with Eval, then combine them: AND/OR use three-valued logic (Logic3); every other operator goes through ApplyBinary.
-- **`compile-closures`** (Go, `go/exercises/lesson01/expressions.go`, 38 lines): Walk the tree once and return a closure per node. Resolve column names to positions now, so the returned function only indexes into the row.
+- **`eval-binary`** (Go, `go/exercises/lesson01/expressions.go`, 9 lines): Evaluate the left side with Eval. For AND/OR, stop if it already decides the answer (FALSE AND …, TRUE OR …); otherwise evaluate the right side and combine: AND/OR with three-valued logic (Logic3), every other operator through ApplyBinary.
+- **`compile-closures`** (Go, `go/exercises/lesson01/expressions.go`, 50 lines): Walk the tree once and return a closure per node. Resolve column names to positions now, so the returned function only indexes into the row.
 - **`and-or-3vl`** (Go, `go/exercises/lesson01/expressions.go`, 8 lines): Return the deciding value if either side has it (false for AND, true for OR); otherwise NULL if either side is NULL; otherwise the ordinary boolean answer.
 - **`eval-binary`** (Clojure, `clojure/ex/exercises/lesson01/expressions.clj`, 5 lines): Apply + - * / to two values with SQL rules: NULL in → NULL out, int∘int stays an int, anything with a float is a float, / always returns a float, x/0 → NULL.
 - **`and-or-3vl`** (Clojure, `clojure/ex/exercises/lesson01/expressions.clj`, 7 lines): AND: false wins, then NULL, then true. OR: true wins, then NULL, then false.

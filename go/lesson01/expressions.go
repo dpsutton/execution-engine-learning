@@ -112,11 +112,17 @@ func Eval(e Expr, schema Schema, row Row) Value {
 	panic(fmt.Sprintf("unknown expression %T", e))
 }
 
-// evalBinary evaluates both children (recursively), then combines them.
+// evalBinary evaluates the children (recursively), then combines them. AND/OR short-circuit: when
+// the left side already decides the answer, the right side is never evaluated.
 func evalBinary(e Bin, schema Schema, row Row) Value {
-	// EXERCISE(eval-binary): Evaluate both sides with Eval, then combine them: AND/OR use
-	// three-valued logic (Logic3); every other operator goes through ApplyBinary.
-	l, r := Eval(e.L, schema, row), Eval(e.R, schema, row)
+	// EXERCISE(eval-binary): Evaluate the left side with Eval. For AND/OR, stop if it already decides
+	// the answer (FALSE AND …, TRUE OR …); otherwise evaluate the right side and combine: AND/OR
+	// with three-valued logic (Logic3), every other operator through ApplyBinary.
+	l := Eval(e.L, schema, row)
+	if (e.Op == "and" && l == false) || (e.Op == "or" && l == true) {
+		return l
+	}
+	r := Eval(e.R, schema, row)
 	if e.Op == "and" || e.Op == "or" {
 		return Logic3(e.Op, l, r)
 	}
@@ -180,10 +186,22 @@ func Compile(e Expr, schema Schema) Compiled {
 	case Bin:
 		l, r := Compile(e.L, schema), Compile(e.R, schema)
 		switch e.Op {
-		case "and":
-			return func(row Row) Value { return And3(l(row), r(row)) }
-		case "or":
-			return func(row Row) Value { return Or3(l(row), r(row)) }
+		case "and": // short-circuit: FALSE AND anything is FALSE, so skip the right side
+			return func(row Row) Value {
+				if a := l(row); a == false {
+					return a
+				} else {
+					return And3(a, r(row))
+				}
+			}
+		case "or": // TRUE OR anything is TRUE
+			return func(row Row) Value {
+				if a := l(row); a == true {
+					return a
+				} else {
+					return Or3(a, r(row))
+				}
+			}
 		}
 		op := e.Op
 		return func(row Row) Value { return ApplyBinary(op, l(row), r(row)) }

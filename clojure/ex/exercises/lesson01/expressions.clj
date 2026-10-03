@@ -4,21 +4,25 @@
 (ns exercises.lesson01.expressions
   "Lesson 1 — rows, values, and evaluating an expression tree.
 
-  A row is a vector of values. A schema is a vector of qualified column names (\"customers.age\")
-  giving each position a name. An expression is a tree, written hiccup-style:
+  A row is a vector of values. A schema is a vector of qualified
+  column names (\"customers.age\") giving each position a name. An
+  expression is a tree, written hiccup-style:
 
       [:and [:> [:col \"age\"] [:lit 30]]
             [:= [:col \"city\"] [:lit \"Austin\"]]]
 
   Two ways to run it:
 
-  - `eval-expr` walks the tree for every row: look at the tag, recurse, combine.
-  - `compile-expr` walks the tree ONCE and returns a closure `(fn [row] ...)`. Column names are
-    resolved to indexes at compile time, and the per-node dispatch disappears into the shape of
-    the nested closures.
+  - `eval-expr` walks the tree for every row: look at the tag,
+  recurse, combine.
 
-  NULL (nil) follows SQL three-valued logic: comparisons with NULL are NULL, `false AND NULL` is
-  false, `true OR NULL` is true."
+  - `compile-expr` walks the tree ONCE and returns a
+  closure `(fn [row] ...)`. Column names are resolved to indexes at
+  compile time, and the per-node dispatch disappears into the shape of
+  the nested closures.
+
+  NULL (nil) follows SQL three-valued logic: comparisons with NULL are
+  NULL, `false AND NULL` is false, `true OR NULL` is true."
   (:require [clojure.string :as str]))
 
 ;;; ------------------------------------------------------------------------------------------------

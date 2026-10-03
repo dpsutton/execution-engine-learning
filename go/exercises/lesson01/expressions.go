@@ -115,9 +115,10 @@ func Eval(e Expr, schema Schema, row Row) Value {
 	panic(fmt.Sprintf("unknown expression %T", e))
 }
 
-// evalBinary evaluates both children (recursively), then combines them.
+// evalBinary evaluates the children (recursively), then combines them. AND/OR short-circuit: when
+// the left side already decides the answer, the right side is never evaluated.
 func evalBinary(e Bin, schema Schema, row Row) Value {
-	// EXERCISE(eval-binary): Evaluate both sides with Eval, then combine them: AND/OR use three-valued logic (Logic3); every other operator goes through ApplyBinary.
+	// EXERCISE(eval-binary): Evaluate the left side with Eval. For AND/OR, stop if it already decides the answer (FALSE AND …, TRUE OR …); otherwise evaluate the right side and combine: AND/OR with three-valued logic (Logic3), every other operator through ApplyBinary.
 	panic("TODO: exercise eval-binary")
 }
 

@@ -73,3 +73,35 @@ func TestPasses(t *testing.T) {
 		t.Error("only exactly-true passes a filter")
 	}
 }
+
+// AND/OR must not evaluate the right side once the left decides the answer. The right side here
+// would panic (comparing a string to a number), so evaluating it fails the test.
+func TestShortCircuit(t *testing.T) {
+	boom := Bin{"<", Lit{"a"}, Lit{int64(1)}}
+	cases := []struct {
+		e    Expr
+		want Value
+	}{
+		{Bin{"and", Lit{false}, boom}, false},
+		{Bin{"or", Lit{true}, boom}, true},
+		{Bin{"and", Lit{nil}, Lit{false}}, false}, // NULL AND FALSE: left doesn't decide; right does
+		{Bin{"or", Lit{nil}, Lit{true}}, true},
+	}
+	for _, c := range cases {
+		for name, run := range map[string]func() Value{
+			"eval":    func() Value { return Eval(c.e, CustomersSchema, Customers[0]) },
+			"compile": func() Value { return Compile(c.e, CustomersSchema)(Customers[0]) },
+		} {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Errorf("%s %s: evaluated the right side: %v", name, c.e, r)
+					}
+				}()
+				if got := run(); got != c.want {
+					t.Errorf("%s %s = %v, want %v", name, c.e, got, c.want)
+				}
+			}()
+		}
+	}
+}

@@ -1,8 +1,8 @@
 window.EE_EXERCISES = [
  {
   "id": "eval-binary",
-  "hint": "Evaluate both sides with Eval, then combine them: AND/OR use three-valued logic (Logic3); every other operator goes through ApplyBinary.",
-  "lines": 5,
+  "hint": "Evaluate the left side with Eval. For AND/OR, stop if it already decides the answer (FALSE AND \u2026, TRUE OR \u2026); otherwise evaluate the right side and combine: AND/OR with three-valued logic (Logic3), every other operator through ApplyBinary.",
+  "lines": 9,
   "lang": "Go",
   "lesson": "01",
   "file": "go/exercises/lesson01/expressions.go"
@@ -10,7 +10,7 @@ window.EE_EXERCISES = [
  {
   "id": "compile-closures",
   "hint": "Walk the tree once and return a closure per node. Resolve column names to positions now, so the returned function only indexes into the row.",
-  "lines": 38,
+  "lines": 50,
   "lang": "Go",
   "lesson": "01",
   "file": "go/exercises/lesson01/expressions.go"
