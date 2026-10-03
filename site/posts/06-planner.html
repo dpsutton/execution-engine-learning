@@ -1,27 +1,7 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Part 6 · Statistics &amp; planning — Execution Engine</title>
-<link rel="stylesheet" href="../assets/style.css">
-<script src="../assets/common.js"></script>
-<script src="../assets/viz/06-planner.js" defer></script>
 <style>
   #viz-dp-note { margin-top: .5rem; }
   .formula { font: .95rem/1.5 var(--mono); background: var(--bg-raised); border: 1px solid var(--rule); border-radius: 8px; padding: .8rem 1rem; margin: 0 0 1.4rem; overflow-x: auto; }
 </style>
-</head>
-<body>
-<header class="topbar">
-  <a class="brand" href="../index.html">Execution Engine</a>
-  <span>Part 6 of 7</span>
-  <span class="spacer"></span>
-  <button class="theme-toggle" type="button">◐ auto</button>
-</header>
-
-<article>
-  <div class="kicker">Part 6 · Statistics &amp; planning</div>
   <h1>Guessing row counts, picking a plan</h1>
   <p class="dek">Parts 3–5 gave us several ways to do every job: three join algorithms, scan or
     index, hash or sort aggregation. Which one is right depends on how many rows each operator will
@@ -287,8 +267,3 @@ cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson06.planner-test</co
     prices them with a crude cost model. Both depend entirely on cardinality estimates, which come
     from per-column summaries (ndv, min/max, equi-depth histograms) combined under independence and
     containment assumptions. When a plan is bad, check the estimates before the cost model.</p></div>
-
-  <div data-series></div>
-</article>
-</body>
-</html>

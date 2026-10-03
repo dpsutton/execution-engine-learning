@@ -1,4 +1,4 @@
-window.EE_EXERCISES = [
+[
  {
   "id": "eval-binary",
   "hint": "Evaluate the left side with Eval. For AND/OR, stop if it already decides the answer (FALSE AND \u2026, TRUE OR \u2026); otherwise evaluate the right side and combine: AND/OR with three-valued logic (Logic3), every other operator through ApplyBinary.",
@@ -375,4 +375,4 @@ window.EE_EXERCISES = [
   "lesson": "07",
   "file": "clojure/ex/exercises/lesson07/vm.clj"
  }
-];
+]

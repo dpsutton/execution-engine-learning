@@ -7,13 +7,18 @@ and to work up to a planner driven by statistics and a resumable bytecode VM lik
 
 ## Read
 
-Open `docs/index.html` in a browser. There's no build step; it works straight from `file://`.
-On GitHub, `.github/workflows/pages.yml` builds the wasm, checks the site, and deploys `docs/`
-(Settings → Pages → Source: GitHub Actions). No Jekyll (`docs/.nojekyll`).
+Live at https://dpsutton.github.io/execution-engine-learning/, including a terminal that runs the
+Go engine and lesson demos in the browser (WebAssembly in a
+[ghostty-web](https://github.com/coder/ghostty-web) terminal).
 
-`docs/terminal.html` runs the Go engine and lesson demos in the browser (compiled to WebAssembly,
-in a [ghostty-web](https://github.com/coder/ghostty-web) terminal). It needs HTTP and a wasm build:
-`tools/build_wasm.sh && uv run python -m http.server -d docs`. On Pages, the deploy workflow builds it.
+This repo holds only the content. The site shell, tooling, and CI come from
+[learning-kit](https://github.com/dpsutton/learning-kit); with its `bin/` on your PATH:
+
+```bash
+lk serve        # build the site (wasm included) and serve it at http://localhost:8000
+lk exercises    # regenerate the exercise track after editing EXERCISE markers
+lk ci           # everything CI checks: tests, demos, golden files, exercises, excerpts, site
+```
 
 Seven posts, each with pseudocode and interactive figures:
 
@@ -51,11 +56,14 @@ but nothing depends on it).
 ## Layout
 
 ```
+learning.json      parts, terminal programs, demos, CI extras (read by learning-kit)
 DESIGN.md          the shared contract: values, semantics, dataset, operators, VM instruction set
+site/              posts/ (article bodies), viz/ (figures), cards/, wild/ (verified excerpts),
+                   intro.html, outro.html, topic.js (toy dataset + PRNG for the figures)
 queries/           golden queries
-docs/              the blog posts (static HTML, vanilla JS figures)
-go/                lessonNN/ standalone lessons, engine/ integrated, cmd/
-clojure/           src/lessonNN/ standalone lessons, src/engine/ integrated
+go/                lessonNN/ standalone lessons, engine/ integrated, cmd/, exercises/ (generated)
+clojure/           src/lessonNN/ standalone lessons, src/engine/ integrated, ex/ (generated exercises)
+video/             the trailer pipeline
 ```
 
 ## Further reading

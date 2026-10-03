@@ -1,12 +1,3 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Part 7 · Bytecode — Execution Engine</title>
-<link rel="stylesheet" href="../assets/style.css">
-<script src="../assets/common.js"></script>
-<script src="../assets/viz/07-bytecode.js" defer></script>
 <style>
   .vm-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 1.1rem; }
   .pc-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 1.1rem; align-items: start; }
@@ -36,17 +27,6 @@
   table.compare td { font-family: var(--sans); font-size: .82rem; }
   .yes { color: var(--good); font-weight: 600; } .no { color: var(--bad); font-weight: 600; } .meh { color: var(--ink-soft); }
 </style>
-</head>
-<body>
-<header class="topbar">
-  <a class="brand" href="../index.html">Execution Engine</a>
-  <span>Part 7 of 7</span>
-  <span class="spacer"></span>
-  <button class="theme-toggle" type="button">◐ auto</button>
-</header>
-
-<article>
-  <div class="kicker">Part 7 · Bytecode</div>
   <h1>Compiling plans to a resumable VM</h1>
   <p class="dek">SQLite doesn't walk a plan tree. It compiles the query into a flat program for a register
     machine and runs that one instruction at a time. Because all of that machine's state is plain data,
@@ -479,8 +459,3 @@ cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson07.bytecode-test</c
       (SIGMOD 1979), and <strong>Leis et al., "How Good Are Query Optimizers, Really?"</strong> (VLDB 2015),
       for parts 5–6.</li>
   </ul>
-
-  <div data-series></div>
-</article>
-</body>
-</html>

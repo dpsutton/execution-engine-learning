@@ -1,0 +1,134 @@
+{
+  "title": "Execution Engine",
+  "headline": "Building a query execution engine",
+  "tagline": "From evaluating one expression against one row to a planner that reads statistics and compiles a query into bytecode you can pause, save, and resume.",
+  "parts": [
+    {
+      "slug": "expressions",
+      "title": "Expressions",
+      "desc": "Rows, values, and evaluating a tree"
+    },
+    {
+      "slug": "iterators",
+      "title": "Iterators",
+      "desc": "Operators that pull one row at a time"
+    },
+    {
+      "slug": "joins",
+      "title": "Joins",
+      "desc": "Nested loops, hash tables, and merging"
+    },
+    {
+      "slug": "aggregation",
+      "title": "Aggregation & sorting",
+      "desc": "Grouping, sorting, and running out of memory"
+    },
+    {
+      "slug": "indexes",
+      "title": "Indexes",
+      "desc": "B+trees and not reading the whole table"
+    },
+    {
+      "slug": "planner",
+      "title": "Statistics & planning",
+      "desc": "Guessing row counts, picking a plan"
+    },
+    {
+      "slug": "bytecode",
+      "title": "Bytecode",
+      "desc": "Compiling plans to a resumable VM"
+    }
+  ],
+  "demos": {
+    "clojure": [
+      "lesson01.expressions",
+      "lesson02.iterators",
+      "lesson03.joins",
+      "lesson04.aggregation",
+      "lesson05.indexes",
+      "lesson06.planner",
+      "lesson07.bytecode"
+    ],
+    "go": [
+      "lesson01",
+      "lesson02",
+      "lesson03",
+      "lesson04",
+      "lesson05",
+      "lesson06",
+      "lesson07"
+    ]
+  },
+  "terminal": {
+    "programs": {
+      "engine": "the integrated engine: a SQL REPL over the generated dataset (-vm, -e \"SQL\", -golden FILE)",
+      "lesson01": "Part 1 · Expressions: tree walking vs closures, three-valued logic",
+      "lesson02": "Part 2 · Iterators: the pull protocol, traced",
+      "lesson03": "Part 3 · Joins: nested loop vs hash vs merge, counted",
+      "lesson04": "Part 4 · Aggregation & sorting: hash/sort agg, external sort, top-N",
+      "lesson05": "Part 5 · Indexes: a B+tree growing, scan vs index",
+      "lesson06": "Part 6 · Statistics & planning: estimates vs actuals, DP join order",
+      "lesson07": "Part 7 · Bytecode: listing, fuel, snapshot, restore"
+    },
+    "files": {
+      "queries/golden.sql": "queries/golden.sql"
+    },
+    "try": [
+      [
+        "engine",
+        "then: SELECT city, count(*) FROM customers GROUP BY city;"
+      ],
+      [
+        "engine -vm",
+        "same engine, bytecode VM; \\program shows the bytecode"
+      ],
+      [
+        "engine -golden queries/golden.sql",
+        ""
+      ],
+      [
+        "lesson07",
+        "pause a query, snapshot it to JSON, resume it"
+      ]
+    ],
+    "smoke": [
+      [
+        "lesson02",
+        "scan read 3 of 4[\\s\\S]*\\$ $",
+        "lesson02 to finish"
+      ],
+      [
+        "engine -vm",
+        "sql> $",
+        "the engine prompt"
+      ],
+      [
+        "SELECT city, count(*) AS n FROM customers GROUP BY city ORDER BY n DESC LIMIT 3;",
+        "\\(3 rows\\)[\\s\\S]*sql> $",
+        "a query result"
+      ],
+      [
+        "\\q",
+        "\\$ $",
+        "the engine to exit"
+      ],
+      [
+        "engine -golden queries/golden.sql",
+        "\\(2 rows\\)\\s*\\S*\\s*\\$ $",
+        "the golden file to run"
+      ]
+    ]
+  },
+  "wild": {
+    "min_sources": 3,
+    "max_per_source": 2
+  },
+  "ci": {
+    "extra": [
+      "cd go && go run ./cmd/engine -golden ../queries/golden.sql | diff - engine/testdata/golden.out",
+      "cd go && go run ./cmd/engine -vm -golden ../queries/golden.sql | diff - engine/testdata/golden.out",
+      "cd clojure && clojure -M -m engine.main --golden ../queries/golden.sql | diff - test/engine/golden.out",
+      "cd clojure && clojure -M -m engine.main --vm --golden ../queries/golden.sql | diff - test/engine/golden.out"
+    ]
+  }
+}

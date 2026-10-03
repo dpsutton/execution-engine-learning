@@ -1,4 +1,4 @@
-window.ENGINE_BLURBS = {
+window.SOURCE_BLURBS = {
   "PostgreSQL": "C, row-oriented heap storage. Plans run as a tree of pull-style executor nodes (Volcano); expressions compile to a flat step program for an interpreter, optionally JIT-compiled with LLVM. A cost-based planner searches join orders exhaustively for small queries and with a genetic algorithm (GEQO) past a threshold.",
   "SQLite": "C, embedded, one database file. SQL compiles to bytecode for the VDBE register machine; every table and index is a B-tree. The model for part 7.",
   "DuckDB": "C++, embedded and analytical, columnar. Plans are split into pipelines that push vectors (chunks of rows) from a source through operators into a sink, scheduled as parallel tasks.",

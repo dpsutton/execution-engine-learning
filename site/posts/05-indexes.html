@@ -1,26 +1,6 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Part 5 · Indexes — Execution Engine</title>
-<link rel="stylesheet" href="../assets/style.css">
-<script src="../assets/common.js"></script>
-<script src="../assets/viz/05-indexes.js" defer></script>
 <style>
   .bt-group { display: inline-flex; gap: .3rem; align-items: center; color: var(--ink-faint); }
 </style>
-</head>
-<body>
-<header class="topbar">
-  <a class="brand" href="../index.html">Execution Engine</a>
-  <span>Part 5 of 7</span>
-  <span class="spacer"></span>
-  <button class="theme-toggle" type="button">◐ auto</button>
-</header>
-
-<article>
-  <div class="kicker">Part 5 · Indexes</div>
   <h1>B+trees and not reading the whole table</h1>
   <p class="dek">Every operator so far starts with a Scan that reads every row. An index lets you
     jump to the rows you want. This part covers how a B+tree does that, what an index scan and an
@@ -232,8 +212,3 @@ cd clojure &amp;&amp; clojure -M:ex -d ex -n exercises.lesson05.indexes-test</co
     operator, it turns a filtered scan into an index scan and a nested-loop join into a sequence of
     seeks. Whether either one is a win depends on how many rows match, so the planner has to
     estimate that.</p></div>
-
-  <div data-series></div>
-</article>
-</body>
-</html>

@@ -1,12 +1,3 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Part 3 · Joins — Execution Engine</title>
-<link rel="stylesheet" href="../assets/style.css">
-<script src="../assets/common.js"></script>
-<script src="../assets/viz/03-joins.js" defer></script>
 <style>
   .jn-grid { display: grid; grid-template-columns: auto minmax(9rem, 13rem) auto; gap: 1.2rem; align-items: start; margin-bottom: 1rem; justify-content: start; }
   @media (max-width: 760px) { .jn-grid { grid-template-columns: 1fr; } }
@@ -27,17 +18,6 @@
   .sc-fill.nl { background: var(--bad); } .sc-fill.hash { background: var(--accent); } .sc-fill.merge { background: var(--teal); }
   .sc-num { display: flex; flex-direction: column; text-align: right; }
 </style>
-</head>
-<body>
-<header class="topbar">
-  <a class="brand" href="../index.html">Execution Engine</a>
-  <span>Part 3 of 7</span>
-  <span class="spacer"></span>
-  <button class="theme-toggle" type="button">◐ auto</button>
-</header>
-
-<article>
-  <div class="kicker">Part 3 · Joins</div>
   <h1>Nested loops, hash tables, and merging</h1>
   <p class="dek">A join's definition is one line: every pair of rows where the condition holds.
     There are three classic ways to compute it, and the difference between them is the difference
@@ -280,8 +260,3 @@ if len(matches) == 0 and kind == LEFT then
     hash the smaller side once and probe with the other (|L|+|R| work, build side in memory), or merge
     two sorted inputs when the sort is free. Outer joins add a "did anything match?" bit on the
     preserved side. Choosing well depends on knowing input sizes before you run.</p></div>
-
-  <div data-series></div>
-</article>
-</body>
-</html>

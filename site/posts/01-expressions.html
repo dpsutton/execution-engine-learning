@@ -1,12 +1,3 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Part 1 · Expressions — Execution Engine</title>
-<link rel="stylesheet" href="../assets/style.css">
-<script src="../assets/common.js"></script>
-<script src="../assets/viz/01-expressions.js" defer></script>
 <style>
   .viz svg text.v-true, td.v-true { fill: var(--good); color: var(--good); }
   .viz svg text.v-false, td.v-false { fill: var(--bad); color: var(--bad); }
@@ -21,17 +12,6 @@
   table.tvl td.v-null { background: var(--bg-sunk); }
   table.tvl td.sel { outline: 2px solid var(--accent); outline-offset: -2px; }
 </style>
-</head>
-<body>
-<header class="topbar">
-  <a class="brand" href="../index.html">Execution Engine</a>
-  <span>Part 1 of 7</span>
-  <span class="spacer"></span>
-  <button class="theme-toggle" type="button">◐ auto</button>
-</header>
-
-<article>
-  <div class="kicker">Part 1 · Expressions</div>
   <h1>Evaluating one expression against one row</h1>
   <p class="dek">The smallest job a query engine has: given a row and an expression like
     <code>age + 10 &gt; 40 AND city = 'Austin'</code>, produce a value. Get this right, including NULL,
@@ -299,8 +279,3 @@ function passes(predicate, row)
     and three-valued logic follows; keep a row only on exactly TRUE. Then move every decision that
     doesn't depend on the row (node type, column position, operator) out of the per-row path by
     compiling the tree once.</p></div>
-
-  <div data-series></div>
-</article>
-</body>
-</html>
