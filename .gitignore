@@ -13,3 +13,4 @@ video/node_modules/
 video/*.mp4
 __pycache__/
 .venv/
+tools/check-site/node_modules/

@@ -7,9 +7,11 @@ and to work up to a planner driven by statistics and a resumable bytecode VM lik
 
 ## Read
 
-Open `docs/index.html` in a browser (it works straight from `file://`; no build step). On GitHub,
-Pages can serve it as-is: Settings → Pages → deploy from branch, folder `/docs`. Seven posts, each with
-pseudocode and interactive figures:
+Open `docs/index.html` in a browser. There's no build step; it works straight from `file://`.
+GitHub Pages serves the same files as-is (`docs/.nojekyll` turns Jekyll off): Settings → Pages →
+deploy from a branch → `main`, folder `/docs`.
+
+Seven posts, each with pseudocode and interactive figures:
 
 1. **Expressions**: rows, values, tree-walking evaluation, three-valued logic, closure compilation
 2. **Iterators**: the Volcano model (Scan, Filter, Project, Limit)
