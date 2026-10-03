@@ -445,7 +445,8 @@ state: 6 host stack frames, locals
     (ns <code>lesson07.bytecode</code>): the compiler, the VM, and a demo that runs a query in small
     fuel slices, snapshots mid-flight, restores into a new VM, and checks the results match. Run with
     <code>go run ./cmd/lesson07</code> or <code>clojure -M -m lesson07.bytecode</code>. The full engine:
-    <code>go run ./cmd/engine -vm</code> or <code>clojure -M -m engine.main --vm</code>.</p></div>
+    <code>go run ./cmd/engine -vm</code> or <code>clojure -M -m engine.main --vm</code>.</p>
+    <p>Or run it right here: <a href="../terminal.html#lesson07">open the terminal</a> (the Go demo, compiled to WebAssembly).</p></div>
 
   <div class="build-it"><p>Write the machine and the compiler: the fetch/dispatch loop with fuel, <code>ResultRow</code>'s yield-and-resume, and the produce/consume code generation for a Filter and a nested-loop join. The exercise track for this part (<code>vm-step-loop</code>, <code>compile-filter</code>, <code>compile-nl-join</code>, plus <code>vm-cursor-ops</code> in Go and <code>vm-result-row</code> in Clojure)
     strips those function bodies out of the lesson and leaves the tests. Fill them in until the tests pass:</p>

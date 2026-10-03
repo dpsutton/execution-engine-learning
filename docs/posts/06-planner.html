@@ -272,7 +272,8 @@ total(plan)                = sum over every operator
     the selectivity and join-cardinality estimator, the cost model, the DP join orderer, and an
     EXPLAIN that runs the plan and prints estimated vs actual rows per node. Run with
     <code>go run ./cmd/lesson06</code> or <code>clojure -M -m lesson06.planner</code>. In the
-    integrated engine: <code>\stats orders</code> and <code>\explain on</code>.</p></div>
+    integrated engine: <code>\stats orders</code> and <code>\explain on</code>.</p>
+    <p>Or run it right here: <a href="../terminal.html#lesson06">open the terminal</a> (the Go demo, compiled to WebAssembly).</p></div>
 
   <div class="build-it"><p>Write the estimator and the search: equality and range selectivity from stats and histograms, equi-join cardinality, and the DP over subsets that picks a join order. The exercise track for this part (<code>eq-selectivity</code>, <code>range-selectivity</code>, <code>join-cardinality</code>, <code>join-order-dp</code>)
     strips those function bodies out of the lesson and leaves the tests. Fill them in until the tests pass:</p>

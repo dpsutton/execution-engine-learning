@@ -8,8 +8,12 @@ and to work up to a planner driven by statistics and a resumable bytecode VM lik
 ## Read
 
 Open `docs/index.html` in a browser. There's no build step; it works straight from `file://`.
-GitHub Pages serves the same files as-is (`docs/.nojekyll` turns Jekyll off): Settings → Pages →
-deploy from a branch → `main`, folder `/docs`.
+On GitHub, `.github/workflows/pages.yml` builds the wasm, checks the site, and deploys `docs/`
+(Settings → Pages → Source: GitHub Actions). No Jekyll (`docs/.nojekyll`).
+
+`docs/terminal.html` runs the Go engine and lesson demos in the browser (compiled to WebAssembly,
+in a [ghostty-web](https://github.com/coder/ghostty-web) terminal). It needs HTTP and a wasm build:
+`tools/build_wasm.sh && uv run python -m http.server -d docs`. On Pages, the deploy workflow builds it.
 
 Seven posts, each with pseudocode and interactive figures:
 

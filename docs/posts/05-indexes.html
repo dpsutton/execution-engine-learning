@@ -216,7 +216,8 @@ IndexScan.Next()
     (ns <code>lesson05.indexes</code>): a B+tree with configurable order and node-visit counters, an
     <code>IndexScan</code>, and an <code>IndexNLJoin</code>. The demo builds an index on
     <code>orders.customer_id</code>, prints a small tree, and compares node visits against a full scan.
-    Run with <code>go run ./cmd/lesson05</code> or <code>clojure -M -m lesson05.indexes</code>.</p></div>
+    Run with <code>go run ./cmd/lesson05</code> or <code>clojure -M -m lesson05.indexes</code>.</p>
+    <p>Or run it right here: <a href="../terminal.html#lesson05">open the terminal</a> (the Go demo, compiled to WebAssembly).</p></div>
 
   <div class="build-it"><p>Write the B+tree yourself: leaf and inner splits on insert, the root-to-leaf search, and the range scan that walks the leaf links. The exercise track for this part (<code>btree-split</code>, <code>btree-search</code>, <code>btree-range</code>)
     strips those function bodies out of the lesson and leaves the tests. Fill them in until the tests pass:</p>

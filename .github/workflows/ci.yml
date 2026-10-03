@@ -93,17 +93,22 @@ jobs:
           test -z "$(git status --porcelain)" || { echo "::error::exercise track is stale: run 'uv run tools/make_exercises.py' and commit"; git diff --stat; exit 1; }
 
   site:
-    name: Site loads with no errors
+    name: Site loads with no errors (terminal included)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7.0.0
         with: { node-version: "22", cache: npm, cache-dependency-path: tools/check-site/package-lock.json }
       - uses: astral-sh/setup-uv@v10.2.0
+      - uses: actions/setup-go@v7.0.0
+        with: { go-version-file: go/go.mod, cache-dependency-path: go/go.mod }
+      - name: build Go → WebAssembly (for the terminal page)
+        run: tools/build_wasm.sh
       - name: syntax-check scripts
         run: git ls-files 'docs/*.js' | xargs -n1 node --check
       - name: links, cards, and every page in headless Chrome
         working-directory: tools/check-site
+        env: { REQUIRE_WASM: "1" }
         run: npm ci && node check.mjs
       - name: Anki export builds from the cards
         run: uv run tools/cards_to_anki.py
